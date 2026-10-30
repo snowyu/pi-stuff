@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node: ["22", "24"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # test/real/* runs against the real pi binary, so pi must be on PATH.
+      # Keep this pin in sync with devDependencies["@earendil-works/pi-coding-agent"].
+      - name: Install pi
+        run: npm install --global @earendil-works/pi-coding-agent@1.4.0
+
+      - run: pi --version
+      - run: node --version
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:real
+
+      - name: Upload pi run artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-runs-node-${{ matrix.node }}
+          path: .tmp/test-runs
+          retention-days: 5
+          if-no-files-found: ignore

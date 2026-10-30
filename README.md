@@ -1,12 +1,15 @@
 # pi-stuff
 
+[![CI](https://github.com/snowyu/pi-stuff/actions/workflows/ci.yml/badge.svg)](https://github.com/snowyu/pi-stuff/actions/workflows/ci.yml)
+
 My [pi](https://pi.dev) customizations, packaged as one [pi package](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md):
 extensions (plus room for skills, prompt templates and themes), each with docs and three tiers of
 tests that run offline with zero LLM calls.
 
 ```sh
 pi install ~/my/dev/pi/pi-stuff            # local, edit then /reload
-pi install git:github.com/riceball/pi-stuff   # once published
+pi install git:github.com/snowyu/pi-stuff          # or from GitHub
+pi install git:github.com/snowyu/pi-stuff@v0.1.0  # pinned tag
 pi config                                    # toggle individual resources
 ```
 

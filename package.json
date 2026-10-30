@@ -8,10 +8,10 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test 'test/*.test.ts'",
-    "test:real": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test 'test/real/*.test.ts'",
+    "test": "node --test 'test/*.test.ts'",
+    "test:real": "node --test 'test/real/*.test.ts'",
     "test:all": "npm test && npm run test:real",
-    "test:watch": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test --watch 'test/*.test.ts'",
+    "test:watch": "node --test --watch 'test/*.test.ts'",
     "typecheck": "tsc --noEmit",
     "postinstall": "node scripts/patch-pi-test-harness.mjs"
   },
@@ -24,5 +24,8 @@
     "@types/node": "^26.6.6",
     "pi-coding-agent-test": "^0.1.4",
     "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=22.18"
   }
 }
