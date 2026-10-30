@@ -1,0 +1,12 @@
+{
+  "name": "pi-stuff",
+  "version": "0.1.0",
+  "description": "Personal pi extensions, skills, prompts and themes",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
