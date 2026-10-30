@@ -1,7 +1,9 @@
 {
   "compilerOptions": {
     "target": "es2023",
-    "lib": ["es2023"],
+    "lib": [
+      "es2023"
+    ],
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "strict": true,
@@ -10,7 +12,15 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["extensions", "test", "scripts"]
+  "include": [
+    "extensions",
+    "lib",
+    "templates",
+    "test",
+    "scripts"
+  ]
 }

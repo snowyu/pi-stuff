@@ -24,6 +24,8 @@
  * Overrides: PROXY_GUARD_MODE=auto|direct|proxy beats the saved mode,
  *            PROXY_GUARD_DISABLE=1 turns the extension off,
  *            PROXY_GUARD_DEBUG=/path/to/log records every decision.
+ *
+ * Documentation: docs/proxy-guard.md   ·   conventions: docs/extension-conventions.md
  */
 
 import { appendFileSync, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";

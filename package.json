@@ -8,8 +8,10 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test 'test/**/*.test.ts'",
-    "test:watch": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test --watch 'test/**/*.test.ts'",
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test 'test/*.test.ts'",
+    "test:real": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test 'test/real/*.test.ts'",
+    "test:all": "npm test && npm run test:real",
+    "test:watch": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test --watch 'test/*.test.ts'",
     "typecheck": "tsc --noEmit",
     "postinstall": "node scripts/patch-pi-test-harness.mjs"
   },
@@ -17,9 +19,10 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
     "@marcfargas/pi-test-harness": "^0.6.1",
     "@types/node": "^26.6.6",
-    "@earendil-works/pi-coding-agent": "1.4.0",
+    "pi-coding-agent-test": "^0.1.4",
     "typescript": "^7.0.2"
   }
 }
