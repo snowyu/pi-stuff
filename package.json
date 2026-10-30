@@ -6,7 +6,20 @@
     "pi-package"
   ],
   "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test 'test/**/*.test.ts'",
+    "test:watch": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test --watch 'test/**/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node scripts/patch-pi-test-harness.mjs"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@marcfargas/pi-test-harness": "^0.6.1",
+    "@types/node": "^26.6.6",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "typescript": "^7.0.2"
   }
 }

@@ -102,7 +102,7 @@ function currentMode(): Mode {
 }
 
 /** host/port of a proxy URL. Accepts "http://host:port", "socks5://host:port", "host:port". */
-function proxyEndpoint(proxy: string): { host: string; port: number } | undefined {
+export function proxyEndpoint(proxy: string): { host: string; port: number } | undefined {
 	let host = "";
 	let port = 0;
 	try {
@@ -120,7 +120,7 @@ function proxyEndpoint(proxy: string): { host: string; port: number } | undefine
 }
 
 /** Normalize what the user typed into a proxy URL pi-web-access will accept. */
-function normalizeProxy(value: string): string | undefined {
+export function normalizeProxy(value: string): string | undefined {
 	const raw = value.trim();
 	if (!raw || /^(none|clear|off|direct|false)$/i.test(raw)) return "";
 	// Only a real scheme prefix counts as a URL; "localhost:8088" is host:port, not scheme:port.
@@ -185,6 +185,39 @@ function writeConfiguredProxy(proxy: string): string {
 	return file;
 }
 
+/**
+ * The whole policy, as a pure function: no fs, no network, no pi types.
+ * `reachable` is only consulted on the auto path, so the caller may skip the probe otherwise.
+ * Exported for unit tests; the `tool_call` handler below only wires it to pi.
+ */
+export interface Decision {
+	/** Value to assign to `input.proxy`; undefined leaves the tool arguments untouched. */
+	inject?: string;
+	/** One-line reason, written to the debug log. */
+	note: string;
+	/** Tell the user their proxy is down. */
+	notify?: boolean;
+}
+
+export function decideProxyCall(o: { toolName: string; mode: Mode; override?: string; configured: string; reachable: boolean }): Decision {
+	if (o.mode === "direct") return { inject: "", note: `${o.toolName}: mode=direct, injected proxy=""` };
+
+	// A manual /proxy-guard url choice is used as given, with no fallback.
+	if (o.override !== undefined && o.mode !== "proxy") {
+		return { inject: o.override, note: `${o.toolName}: override proxy=${JSON.stringify(o.override)}` };
+	}
+
+	if (!o.configured) return { note: `${o.toolName}: no proxy configured, left direct` };
+	if (o.mode === "proxy") return { note: `${o.toolName}: mode=proxy, keeping ${o.configured}` };
+
+	if (o.reachable) return { note: `${o.toolName}: mode=auto, proxy ${o.configured} reachable, kept` };
+	return {
+		inject: "", // documented as "forces a direct connection"
+		note: `${o.toolName}: mode=auto, proxy ${o.configured} unreachable, injected proxy=""`,
+		notify: true,
+	};
+}
+
 async function describeState(): Promise<string> {
 	const mode = currentMode();
 	const override = loadState().proxyOverride;
@@ -206,43 +239,29 @@ export default function (pi: ExtensionAPI) {
 			if (!WEB_TOOLS.has(event.toolName)) return;
 
 			const input = event.input as Record<string, unknown>;
-			// Honour an explicit proxy the model already chose.
-			if (typeof input?.proxy === "string" && input.proxy !== "") return;
+			// Honour an explicit proxy the model already chose ("" is an explicit direct request).
+			if (typeof input?.proxy === "string" && input.proxy !== "") {
+				debug(`${event.toolName}: explicit proxy in args, untouched`);
+				return;
+			}
 
 			const state = loadState();
 			const mode = currentMode();
-			const proxy = configuredProxy();
+			const configured = configuredProxy();
+			// Only pay for a TCP probe on the branch that reads it.
+			const probe = mode === "auto" && state.proxyOverride === undefined && configured !== "";
 
-			if (mode === "direct") {
-				input.proxy = "";
-				debug(`${event.toolName}: mode=direct, injected proxy=""`);
-				return;
-			}
+			const decision = decideProxyCall({
+				toolName: event.toolName,
+				mode,
+				override: state.proxyOverride,
+				configured,
+				reachable: probe ? await proxyIsUp(configured) : true,
+			});
 
-			// A manual /proxy-guard url choice is used as given, with no fallback.
-			if (state.proxyOverride !== undefined && mode !== "proxy") {
-				input.proxy = state.proxyOverride;
-				debug(`${event.toolName}: override proxy=${JSON.stringify(state.proxyOverride)}`);
-				return;
-			}
-
-			if (!proxy) {
-				debug(`${event.toolName}: no proxy configured, left direct`);
-				return;
-			}
-			if (mode === "proxy") {
-				debug(`${event.toolName}: mode=proxy, keeping ${proxy}`);
-				return;
-			}
-
-			if (await proxyIsUp(proxy)) {
-				debug(`${event.toolName}: mode=auto, proxy ${proxy} reachable, kept`);
-				return;
-			}
-
-			input.proxy = ""; // documented as "forces a direct connection"
-			debug(`${event.toolName}: mode=auto, proxy ${proxy} unreachable, injected proxy=""`);
-			ctx.ui.notify(`proxy-guard: ${proxy} unreachable -> ${event.toolName} direct`, "info");
+			debug(decision.note);
+			if (decision.inject !== undefined) input.proxy = decision.inject;
+			if (decision.notify) ctx.ui.notify(`proxy-guard: ${configured} unreachable -> ${event.toolName} direct`, "info");
 		} catch {
 			// Stay out of the way: let the tool call run with its original arguments.
 		}
