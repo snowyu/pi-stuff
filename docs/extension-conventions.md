@@ -9,16 +9,26 @@ Start from [`templates/extension.ts`](../templates/extension.ts) and
 ```
 extensions/<name>.ts                 # single file, the common case
 extensions/<name>/index.ts           # multi-file: helpers, sub-tools
+extensions/<name>/core.ts            # optional: pure decision core, imports no pi types
 docs/<name>.md                       # required: what it does, commands, config, failure mode
 test/<name>.unit.test.ts             # required: the pure decision core
+test/<name>.core.test.ts             # same idea when the core is a directory-split module
+test/<name>.golden.test.ts           # when the extension reproduces pi-generated text
 test/<name>.session.test.ts          # required: in-process pi session
 test/real/<name>.real.test.ts        # when pi-level behaviour matters (CLI, tools, TUI)
+test/real/<name>.drift.real.test.ts  # live comparison against the real pi binary
+test/fixtures/                       # fixture extensions loaded by tests, and recorded baselines
 ```
 
 - One extension per file; kebab-case name; the file name is what `pi config` and `/reload` show.
 - A file dropped in `extensions/` is auto-discovered, so **never** put helpers, fixtures, templates or
   scratch files in there: they get loaded as extensions. Shared code lives in `lib/`, test helpers in
-  `test/`, starting points in `templates/`.
+  `test/`, starting points in `templates/`. A directory counts as one extension only through its
+  `index.ts`, which is what lets `extensions/persona/core.ts` exist — but no `*.test.ts` belongs next to
+  it either way: every test file lives under `test/`.
+- Split `index.ts` (pi wiring: fs, env, `ctx.ui`, state files) from `core.ts` (pure data in, data out,
+  no pi import) once the logic carries real policy. The core then takes its own narrow DTO rather than
+  pi's option types, so tier 1 tests never depend on pi's shape.
 - Slash commands are namespaced by the extension name: `/proxy-guard`, never `/status`.
 
 ## 2. Module shape
@@ -104,13 +114,21 @@ function agentDir(): string {
   the extension can bypass pi's module mapping and duplicate classes and registries.
 - Third-party runtime libraries go in `dependencies` and must be referenced through `node_modules`
   paths. Ask first whether the extension really needs one.
+- **Import nothing that is not declared.** A package reachable only through pi's own dependency tree
+  resolves today and breaks the day pi changes it — `persona` used `yaml` that way. Either declare it
+  (and accept installing it for every user of the package) or implement the narrow thing you actually
+  need, as `core.ts` does for front-matter: a YAML subset, and an explicit error for anything outside it
+  instead of a silently wrong value.
 - Test-only needs (`typescript`, `@types/node`, harnesses) go in `devDependencies`.
 
 ## 6. Docs required per extension
 
 `docs/<name>.md` must cover: the problem it solves, how it hooks in (which event, what it changes),
 every command and argument, config/state files and keys, env overrides, timing/caching behaviour,
-what happens on failure, and how to verify it is active. Link the source and the test files at the top.
+what happens on failure (including what the failure mode deliberately cannot do), every name or path
+the user may type and how it is validated, and how to verify it is active. If it reproduces something
+pi generates, document how to recalibrate after a pi version bump. Link the source and the test files at
+the top.
 
 ## 7. Checklist before committing
 
@@ -122,6 +140,9 @@ what happens on failure, and how to verify it is active. Link the source and the
 [ ] state file: defaults on missing/corrupt, updatedAt written, keys documented
 [ ] command name is namespaced; usage printed on unknown subcommand
 [ ] docs/<name>.md exists and covers commands, config, env, failure mode
+[ ] every imported package is declared; nothing borrowed from pi's dependency tree
+[ ] if pi-generated text is reproduced: golden fixture committed + drift test, and the pi pin moves in
+    package.json / CI / fixture together
 [ ] unit + session tests pass:  npm test
 [ ] real-process test if pi-level behaviour matters:  npm run test:real
 [ ] npm run typecheck is clean

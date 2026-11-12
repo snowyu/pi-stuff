@@ -1,7 +1,7 @@
 # Testing extensions
 
-Three tiers, all offline and with **no LLM calls**. Measured here: 104 fast tests in ~0.8 s
-(`npm test`), plus 8 real-process scenarios in ~1.9 s (`npm run test:real`).
+Three tiers, all offline and with **no LLM calls**. Measured here: 91 fast tests in ~1 s
+(`npm test`), plus 9 real-process scenarios in ~3 s (`npm run test:real`).
 
 ```sh
 npm test              # tier 1 + tier 2 (fast, no child processes)      → test/*.test.ts
@@ -31,6 +31,14 @@ extension file with no pi runtime at all:
 import { decideProxyCall } from "../extensions/proxy-guard.ts";
 ```
 
+`extensions/persona/core.ts` goes further and imports **no pi types at all**: it takes its own narrow
+DTO (`PromptFacts`, only the fields actually used), and the wiring layer converts pi's
+`BuildSystemPromptOptions` into it. So tier 1 for persona does not depend on pi's shape, and a pi
+signature change breaks one function in `index.ts` instead of the whole test suite.
+
+Core tests live in `test/`, never next to the extension: `extensions/` is scanned by pi, and a
+`*.test.ts` sitting in a directory extension is one confusing near-miss away from being loaded.
+
 Drive it with a table so adding a branch forces a new case:
 
 ```ts
@@ -49,6 +57,28 @@ for (const testCase of cases) {
 
 TypeScript keeps these honest: `erasableSyntaxOnly` in `tsconfig.json` rejects syntax Node cannot
 strip (enums, namespaces, parameter properties), so the same file works under `node --test` and `tsc`.
+
+### Tier 1.5 — a recorded pi prompt (golden fixture)
+
+When an extension reproduces something pi generates, calling the pure function on hand-written inputs
+proves only that it is self-consistent. It does not prove the reproduction matches pi. For that, record
+what pi really produced once and compare forever:
+
+```
+test/fixtures/pi-sections.json      # piVersion + the structured facts pi handed a handler + pi's own <tools>/<rules> text
+test/persona.golden.test.ts         # core.ts rendering vs. that record, plus fixture self-consistency
+```
+
+The fixture is produced inside a real pi run (`/persona golden`), not written by hand, and it is a
+**required file**: the golden test fails when it is missing rather than skipping. It also asserts that
+the `piVersion` it was recorded on equals the pi pinned in `devDependencies` — a version bump without a
+re-recording is red before anything else is.
+
+A recorded fixture is one loadout, and `buildSystemPromptSections()` has branches (PowerShell instead of
+bash, both shells, no shell, no tools, hidden tools). Those branches are covered against the **live** pi
+in `test/real/persona.drift.real.test.ts`: it rewrites the loadout seven ways from a handler and compares
+pi's rendering with `core.ts`'s rendering in the same process. Mutation-checked: breaking `renderRules`
+makes the drift test fail.
 
 ## Tier 2 — in-process pi session
 
@@ -148,9 +178,10 @@ the prompt too — `getSystemPrompt(run)` is the effective prompt of the real ru
 an evaluation, and it is not reproducible.
 
 Notes: it needs `pi` on `PATH` and Node ≥ 22.19; `node-pty` builds at install; the Chromium/browser
-fixtures are optional (`npx playwright install chromium`) and unused here. It works on pi 1.4.0 with no
-patch (checked 2026-10-30), unlike tier 2 — driving the CLI instead of pi's JS API makes it far less
-fragile.
+fixtures are optional (`npx playwright install chromium`) and unused here. It works on the pi version
+pinned in `devDependencies` with no patch (checked against 1.5.2, 2026-10-31), unlike tier 2 — driving
+the CLI instead of pi's JS API makes it far less fragile. It is also the only tier that can notice pi's
+prompt generation changed under us: see the drift test above.
 
 ## Isolation rules (all tiers)
 
@@ -165,13 +196,18 @@ fragile.
   (proxy-guard caches probes per URL for 10 s, so every test uses a distinct URL).
 - Give every test a unique `testName` in tier 3 so artifacts do not overwrite each other.
 
-## Test runner: `node:test` today, vitest if…
+## Test runner: `node:test`, not vitest
 
 Everything here runs on Node's built-in runner with no test-framework dependency:
 
 ```
 node --experimental-strip-types --disable-warning=ExperimentalWarning --test 'test/*.test.ts'
 ```
+
+This is a rule, not a default: vitest was tried, and it bought nothing while adding a second runner to
+keep in step (two test files quietly stopped running under `npm test` when they were written in vitest
+APIs). Every test file in this repo imports `node:test`. If you ever switch, switch the whole suite in
+one commit — a split runner silently drops files.
 
 Both harnesses advertise vitest in their examples, but neither needs it: they are plain async APIs.
 
@@ -183,10 +219,9 @@ Both harnesses advertise vitest in their examples, but neither needs it: they ar
 | coverage, reporters, browser/CT contexts | no | yes |
 | copy-pasting the harnesses' README examples unchanged | needs an import swap | yes |
 
-Recommendation for this package: **stay on `node:test`.** The suite is small, deterministic, and
-sub-second; the maintenance cost of a framework plus a patched dependency already dominates it.
-Switch when you start wanting snapshots or coverage, or when the suite grows past the point where
-`--test-name-pattern` is enough.
+The suite is small, deterministic and sub-second; the maintenance cost of a framework plus a patched
+dependency already dominates it. If snapshots or coverage ever become worth it, switch the whole suite
+in one commit, timeout and scripts included.
 
 Migration is mechanical, and this file's examples work either way:
 
