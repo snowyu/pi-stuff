@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	type AgentEndEvent,
 	type BuildSystemPromptOptions,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -11,6 +12,7 @@ import {
 	getDocsPath,
 	getExamplesPath,
 	getReadmePath,
+	type TurnEndEvent,
 	VERSION,
 } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
@@ -144,8 +146,16 @@ export default function persona(pi: ExtensionAPI) {
 	let lastGood: PersonaDecision | undefined;
 	let lastError: { persona: string; message: string; at: string } | undefined;
 	let lastWarnKey = "";
-	/** 本进程里是否真的跑过一个 run——没跑过时 ctx.getSystemPrompt() 会给 pi 原生 prompt。 */
-	let hasRun = false;
+	/**
+	 * 上一次 run 真正渲染出的 prompt（快照）。
+	 *
+	 * pi 只把 `before_agent_start` 的修改保留在 run 作用域里：`_runSystemPromptOptions`（"Prompt options
+	 * after before_agent_start mutations for the active run"）在 run 的 `finally` 里被清成 undefined。
+	 * 而 `ctx.getSystemPrompt()` 是现渲染：`buildSystemPrompt(_runSystemPromptOptions ?? _baseSystemPromptOptions)`。
+	 * 斜杠命令必在 idle 时跑，所以在命令里拿到的永远是 base options 的渲染 = pi 原生 prompt。
+	 * 想报告“当前生效的 prompt”，只能在 run 里抓。
+	 */
+	let lastPrompt: string | undefined;
 	let lastCapture: { facts: PromptFacts; piPromptText: string } | undefined;
 
 	const status = (ctx: ExtensionContext) => {
@@ -192,6 +202,9 @@ export default function persona(pi: ExtensionAPI) {
 						: sessionEntry ? "session entry" : "personas/current";
 			lastGood = undefined;
 			lastError = undefined;
+			// 快照是会话级的：不清就会把上一个会话的 prompt 当成本会话的导出。
+			lastPrompt = undefined;
+			lastCapture = undefined;
 		} catch (e) {
 			current = undefined;
 			currentSource = "(error)";
@@ -201,7 +214,6 @@ export default function persona(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
-		hasRun = true;
 		const o = event.systemPromptOptions;
 		try {
 			lastCapture = { facts: facts(o, pi.getActiveTools()), piPromptText: event.systemPrompt ?? "" };
@@ -243,6 +255,18 @@ export default function persona(pi: ExtensionAPI) {
 		status(ctx);
 	});
 
+	/* 抢在 pi 把 `_runSystemPromptOptions` 清掉之前拍快照。turn_end / agent_end 都在 run 窗口内；
+	 * 选它们而不是 before_agent_start 末尾，因为 pi 在 handler 返回后才定稿 selectedTools / hiddenTools，
+	 * 这时候渲染的才是模型真看到的工具集。两个都抓：turn_end 让快照在长 run 里保持新鲜，agent_end
+	 * 保证被取消 / 出错的 run 也能拿到。 */
+	const snapshotPrompt = (_event: TurnEndEvent | AgentEndEvent, ctx: ExtensionContext) => {
+		try {
+			lastPrompt = ctx.getSystemPrompt();
+		} catch { /* 快照失败不干预主流程；下轮再抓 */ }
+	};
+	pi.on("turn_end", snapshotPrompt);
+	pi.on("agent_end", snapshotPrompt);
+
 	pi.registerCommand("persona", {
 		description: "Switch persona: /persona [name] [new] · off · dirs · prompt · status · golden",
 		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
@@ -274,21 +298,24 @@ export default function persona(pi: ExtensionAPI) {
 					return;
 				}
 				if (head === "prompt") {
-					// ctx.getSystemPrompt() 在没有 run 时会退回 base options 的渲染——那是 pi 原生 prompt，
-					// 不是"当前生效的 prompt"，所以先拿本进程的 hasRun 拦一手。
-					if (!hasRun) {
-						ctx.ui.notify("persona: 本会话还没有跑过任何 run，现在导出的是 pi 原生 prompt。先发一条消息再试", "warning");
+					// 只能报告 pi 真的渲染过的那一份。没快照就是没渲染过：宁可拒，也不能把现渲的 pi 原生
+					// prompt 当“生效 prompt”写出去——那是错值，还带个成功的 notify。
+					if (!lastPrompt) {
+						ctx.ui.notify("persona: 本会话还没有跑过任何 run，现在导出只会是 pi 原生 prompt。先发一条消息再试", "warning");
 						return;
 					}
-					const text = ctx.getSystemPrompt();
-					if (!text) {
-						ctx.ui.notify("persona: 当前还没有生效的 prompt，先发一条消息再试", "warning");
-						return;
-					}
+					const text = lastPrompt;
 					const out = join(getAgentDir(), "personas", ".rendered.txt");
 					mkdirSync(dirname(out), { recursive: true });
 					writeFileSync(out, text, "utf8");
-					ctx.ui.notify(`Effective prompt written: ${out}`, "info");
+					// 切了人设但没跑：快照还是上一个 run 的 prompt。notify 里说清它来自哪。
+					ctx.ui.notify(`Effective prompt from the last run written: ${out}`, "info");
+					if (lastError) {
+						ctx.ui.notify(
+							`persona: 上次 run 渲染失败（${lastError.persona}: ${lastError.message}），导出的是回退后的 prompt`,
+							"warning",
+						);
+					}
 					return;
 				}
 

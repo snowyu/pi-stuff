@@ -79,7 +79,7 @@ pi                           # 沿用上次记住的人设
 /persona off                 交还 pi 原生 prompt
 /persona default             用出厂复刻人设
 /persona dirs                看搜索路径
-/persona prompt              导出当前生效的 prompt
+/persona prompt              导出最近一次 run 真生效的 prompt（需先发过一条消息）
 /persona status              当前人设 / mode / on_error / 缓存 / 最近一次错误
 /persona golden              重录 <tools>/<rules> 基线（升级 pi 后跑，见「验证与排错」）
 ```
@@ -305,9 +305,9 @@ jinja 引擎（`@isdk/template-engines` 的 `HFTemplate`）**没有语句级 `{%
 | `/persona <name> new` | 切换 + 开新会话（内部 `ctx.newSession()`） |
 | `/persona off` | 交还 pi 原生 |
 | `/persona dirs` | 打印搜索路径 |
-| `/persona prompt` | 把当前生效 prompt 写到 `~/.pi/agent/personas/.rendered.txt`（本会话还没跑过 run 时会拒绝，因为那时拿到的只是 pi 原生 prompt） |
+| `/persona prompt` | 把**最近一次 run 真正渲染出的** prompt 写到 `~/.pi/agent/personas/.rendered.txt`。本会话还没跑过 run 时拒绝导出（那份 prompt 还不存在），`/new` 后快照失效 |
 | `/persona status` | 当前人设及来源（flag / env / 会话条目 / 文件）、mode、`on_error`、缓存、最近一次错误原文与时间 |
-| `/persona golden` | 在**当前这个真实 pi 进程**里录一份 `<tools>`/`<rules>` 基线到 `test/fixtures/pi-sections.json`（升级 pi 后校准用） |
+| `/persona golden` | 在**当前会话**里录一份 `<tools>`/`<rules>` 基线到 `test/fixtures/pi-sections.json`（升级 pi 后校准用） |
 
 **为什么不是 `/new <人设>`**：`/new` 是内置命令且不接受参数（`BUILTIN_SLASH_COMMANDS` 里没有 `argumentHint`），扩展注册同名命令会触发 pi 的冲突告警并在自动补全里被跳过。所以用 `/persona <name> new`。
 
@@ -349,7 +349,7 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
 
 **不要问模型"你的 system prompt 是什么"**，它会复述、改写、编造。
 
-1. `/persona prompt` → 打开 `~/.pi/agent/personas/.rendered.txt`，这是真实生效的文本。
+1. `/persona prompt` → 打开 `~/.pi/agent/personas/.rendered.txt`，这是上一次 run 里模型真收到的文本（切了人设但还没跑，它还是**上一个** run 的——notify 会说清）。
 2. `/persona dirs` → 确认人设文件被扫到。
 3. 看请求 payload：临时加一个 `pi.on("before_provider_request", …)` 打印，或用本地 logging 代理 + `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`。
 4. `/persona status` → 看当前人设、来源、mode/on_error、缓存和**最近一次错误原文**（渲染失败不会静默，但通知会过，status 里能回查）。
@@ -363,7 +363,7 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
 
 **pi 升级后的校准流程**：先改 `package.json` 的 `devDependencies` + CI 的 pi pin → `npm install` → 跑 `npm run test:all`，看红的是哪段 → 在升级后的 pi 里执行 `/persona golden` 重录基线（前提：没有 `SYSTEM.md` / `--system-prompt`，否则 pi 压根不生成那两段）→ 按差异改 `core.ts` 的 `renderTools` / `renderRules` → 测试转绿后提交新 fixture。fixture 是**必需文件**：缺了它是红，不是跳过。
 
-`/persona golden` 在开发 checkout 里直接写回 `test/fixtures/pi-sections.json`；从**已安装的包**里跑时写到 `~/.pi/agent/personas/pi-sections.json`（不往安装目录造文件），再手动复制回仓库。它录的是**当前这个进程**刚跑过的那个 run，所以先随便发一条消息。
+`/persona golden` 在开发 checkout 里直接写回 `test/fixtures/pi-sections.json`；从**已安装的包**里跑时写到 `~/.pi/agent/personas/pi-sections.json`（不往安装目录造文件），再手动复制回仓库。它录的是**当前会话**刚跑过的那个 run（`/new` 会清掉），所以先随便发一条消息。
 
 `docs` 不在比对范围：它是抽取优先，本来就允许跟 pi 文案有出入，兜底文案漂移无关痛痒。
 
@@ -391,8 +391,12 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
 8. **`last` 回退不跳进程**。缓存是进程内的，重启后首次渲染失败就是 pi 原生 prompt。
 9. **sections 名受 pi 约束**。自定义段名必须匹配 `/^[a-z][a-z0-9_-]*$/`，且 `preamble` 保留；写错会在切换时报错，不是静默丢掉。
 10. **其它扩展的 section 会被保留**。注入默认段时会把 `options.sections` 里已有的同名段交回给那个扩展（merge，不是 overwrite），但**同名段只有一个**——两个扩展都想叫 `rules` 时仍是后者胜出，这是 pi 的数据结构，不是本扩展能修的。
+11. **`/persona prompt` 报告的是过去，不是将来**。它导出的是 `turn_end` / `agent_end` 拍的快照。刚切人设还没跑，导出的仍是上一个 run 的 prompt；`/new` 会清掉快照。
 
 ## 设计决策
+
+- **为什么 `/persona prompt` 用快照而不是 `ctx.getSystemPrompt()`**：pi 只把 `before_agent_start` 的修改存在 run 作用域里（`_runSystemPromptOptions`，注释写着 "for the active run"，run 的 `finally` 里清成 `undefined`），而 `getSystemPrompt()` 是**现渲染**：`buildSystemPrompt(_runSystemPromptOptions ?? _baseSystemPromptOptions)`。斜杠命令必在 idle 时执行，所以命令里拿到的一律是 base options 的渲染 = pi 原生 prompt。于是只能在 run 里抓：`turn_end` / `agent_end` 抓的是 pi **定稿 `selectedTools` / `hiddenTools` 之后**的渲染，比 handler 时刻更接近模型真看到的。不取 `lastRendered`：那是我们自己设的 `customPrompt`，pi 还会在后面追加 `<cwd>` 等段，不是完整 prompt。
+- **为什么 `/persona prompt` 不自动发一条探针消息**：`pi.sendUserMessage()` 能做到，但那是一次真 run——花 provider 调用、往 transcript 里塞一条会被 pirate 认真回答的 "hi"、还得 `waitForIdle()`。而且信息量并不增加（任何 run 都会抓快照），失败时反而更糟：探针那轮如果渲染失败，快照就是回退后的原生 prompt，会被当成"生效 prompt"导出。也没有免模型的路子：`buildSystemPrompt` 不在包导出里，而 pi 的 `exports` 只允许 `.` 和 `./rpc-entry`（`ERR_PACKAGE_PATH_NOT_EXPORTED`），自己拼段就是再抄一遍 pi 的拼装规则。所以冷启动直接拒绝：“先发一条消息再试”。
 
 - **为什么直接用 `HFTemplate` 而不是 `StringTemplate`**：后者是异步统一层，且默认 `expandValue: true` 会把注入值里的 `{{ }}` 当模板**二次渲染**（AGENTS.md、pi 文档里很容易出现），默认 `tagFinalString: true` 还可能返回 boxed `String`。直接用 `HFTemplate` 同步渲染，这三个问题一次消失。将来要加多引擎，再换 `StringTemplate.format` 并显式设 `expandValue: false, tagFinalString: false`。
 - **为什么 sections 是默认**：保留 pi 的分段增量补丁，切人设通常只 patch `preamble`，缓存友好。

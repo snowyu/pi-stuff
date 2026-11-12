@@ -17,7 +17,7 @@
  */
 import { createTestSession, says, when, type TestSession } from "@marcfargas/pi-test-harness";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, beforeEach, describe, test } from "node:test";
@@ -61,6 +61,11 @@ function tempAgentDir(personas: Record<string, string>): string {
 
 function stateFile(agentDir: string): string {
 	return join(agentDir, "personas", "current");
+}
+
+/** Where `/persona prompt` writes the exported prompt. */
+function renderedFile(agentDir: string): string {
+	return join(agentDir, "personas", ".rendered.txt");
 }
 
 /** Run the registered slash command the way pi's TUI would. */
@@ -442,6 +447,106 @@ describe("persona in a real pi session", () => {
 			// as "the effective prompt" would be a lie.
 			await runCommand(session, "persona", "prompt");
 			assert.match(lastNote(session), /还没有跑过任何 run/);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("/persona prompt exports what the last run really used, not pi's own prompt", async () => {
+		// pi only keeps `before_agent_start` mutations for the active run (agent-session.ts:
+		// "_runSystemPromptOptions ... for the active run", cleared in the run's finally). Commands run
+		// while idle, so ctx.getSystemPrompt() re-renders from base options: pi's own prompt. The export
+		// has to come from a snapshot taken inside the run.
+		const agentDir = tempAgentDir({ pirate: PIRATE });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "pirate");
+			await session.run(when("hi", [says("ahoy")]));
+			await runCommand(session, "persona", "prompt");
+
+			const exported = readFileSync(renderedFile(agentDir), "utf8");
+			assert.match(exported, /You are a pirate coding matey/);
+			assert.ok(!exported.includes("coding assistant running inside pi"), "the persona prompt must be the export");
+			assert.match(exported, /<cwd>/, "the export is pi's full render, not just the preamble we set");
+			assert.match(lastNote(session), /Effective prompt from the last run written/);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("with no persona chosen, /persona prompt exports pi's own prompt", async () => {
+		const agentDir = tempAgentDir({});
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await session.run(when("hi", [says("ahoy")]));
+			await runCommand(session, "persona", "prompt");
+			assert.match(readFileSync(renderedFile(agentDir), "utf8"), /coding assistant running inside pi/);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("a new session cannot export the previous session's prompt", async () => {
+		const agentDir = tempAgentDir({ pirate: PIRATE });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "pirate");
+			await session.run(when("hi", [says("ahoy")]));
+			await runCommand(session, "persona", "prompt");
+			assert.match(readFileSync(renderedFile(agentDir), "utf8"), /pirate/);
+			rmSync(renderedFile(agentDir));
+
+			// What `/new` does to the extension: a fresh session_start with no run behind it yet.
+			const runner = session.session.extensionRunner as ExtensionRunner;
+			await runner.emit({ type: "session_start", reason: "new" });
+			await runCommand(session, "persona", "prompt");
+
+			assert.match(lastNote(session), /还没有跑过任何 run/);
+			assert.ok(!existsSync(renderedFile(agentDir)), "a snapshot from the old session must not be exported");
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("switching persona without a run exports the previous run's prompt, and says so", async () => {
+		// The only prompt we can report is the one pi really rendered. Until a run happens, the new
+		// persona has no render to report — the notify must be explicit that this is the last run's.
+		const agentDir = tempAgentDir({ pirate: PIRATE, reviewer: REVIEWER });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "pirate");
+			await session.run(when("hi", [says("ahoy")]));
+			await runCommand(session, "persona", "reviewer");
+			await runCommand(session, "persona", "prompt");
+
+			const exported = readFileSync(renderedFile(agentDir), "utf8");
+			assert.match(exported, /pirate coding matey/, "the export is what the last run used");
+			assert.ok(!exported.includes("senior code reviewer"), "nothing unrendered may be presented as effective");
+			assert.match(lastNote(session), /last run/);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("after a run fell back to pi's prompt, that fallback is what gets exported", async () => {
+		// The file must match what the model saw, even when what it saw was not the persona.
+		const broken = "---\non_error: native\n---\nYou are the strict captain.\n";
+		const agentDir = tempAgentDir({ strict: broken });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "strict");
+			await session.run(when("one", [says("aye")]));
+			writeFileSync(join(agentDir, "personas", "strict.md"), "---\non_error: native\n---\n{{ include('missing') }}");
+			await session.run(when("two", [says("ok")]));
+			await runCommand(session, "persona", "prompt");
+
+			const exported = readFileSync(renderedFile(agentDir), "utf8");
+			assert.ok(!exported.includes("strict captain"), "the last run used pi's own prompt");
+			assert.match(exported, /coding assistant running inside pi/);
+			assert.ok(
+				notes(session).some((n) => /回退|fallback/i.test(n)),
+				"exporting a fallback prompt has to be flagged",
+			);
 		} finally {
 			session.dispose();
 		}
