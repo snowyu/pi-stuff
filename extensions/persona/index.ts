@@ -21,17 +21,19 @@ import {
 	type Mode,
 	type PersonaDecision,
 	type ProviderSystem,
+	type ProviderTools,
 	type PersonaMeta,
 	type PromptFacts,
 	assertSafeName,
 	decidePersona,
 	extractProviderSystem,
+	extractProviderTools,
 	extractSection,
 	isOff,
 	isReserved,
 	normalizeName,
 	parsePersona,
-	renderRequestView,
+	renderPromptNotes,
 	resolveCurrent,
 	resolveMode,
 	resolveOnError,
@@ -165,11 +167,15 @@ export default function persona(pi: ExtensionAPI) {
 		mode: Mode;
 		declared: DeclaredTool[];
 		undeclared: string[];
+		/** 这份渲染是回退产物（模板环 / 复用上次好的）——逐字文件里不能自己说，只能记在注释里。 */
+		fallback?: string;
 	} | undefined;
 	/** 上一次 run 实际生效的人设模式（回退时是回退后的那份）。 */
 	let lastRunMode: Mode = "sections";
 	/** provider 侧的 system 原文（`before_provider_request` 的 payload 里抽的）。 */
 	let lastProvider: ProviderSystem | undefined;
+	/** 同一个 payload 里的工具定义，原封不动（不做摘要）。 */
+	let lastTools: ProviderTools | undefined;
 	/** 该捕获是否来自 agent run；pi 的 compaction / 摘要请求走同一个 hook。 */
 	let providerFromRun = false;
 	let inAgentRun = false;
@@ -223,6 +229,7 @@ export default function persona(pi: ExtensionAPI) {
 			lastRun = undefined;
 			lastRunMode = "sections";
 			lastProvider = undefined;
+			lastTools = undefined;
 			providerFromRun = false;
 			inAgentRun = false;
 			lastCapture = undefined;
@@ -296,6 +303,7 @@ export default function persona(pi: ExtensionAPI) {
 				declared: all.filter((t) => active.has(t.name))
 					.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
 				undeclared: all.filter((t) => !active.has(t.name)).map((t) => t.name),
+				fallback: lastError ? `persona '${lastError.persona}' failed: ${lastError.message}` : undefined,
 			};
 		} catch { /* 快照失败不干预主流程；下轮再抓 */ }
 	};
@@ -313,10 +321,12 @@ export default function persona(pi: ExtensionAPI) {
 	});
 	pi.on("before_provider_request", (event, ctx) => {
 		const got = extractProviderSystem(event.payload);
-		if (!got.text && !got.note) return;
+		const tools = extractProviderTools(event.payload);
+		if (!got.text && !got.note && !tools.tools) return;
 		// run 内的捕获优先：idle 时看到的（compaction / 摘要 / 下一次请求）不能顶掉它。
 		if (providerFromRun && !inAgentRun) return;
 		lastProvider = { ...got, model: ctx.model?.id };
+		lastTools = tools;
 		providerFromRun = inAgentRun;
 	});
 
@@ -359,16 +369,26 @@ export default function persona(pi: ExtensionAPI) {
 					}
 					const dir = join(getAgentDir(), "personas");
 					mkdirSync(dir, { recursive: true });
-					// 逐字的 system 角本文本（可以直接 diff / 录 golden）。
-					const out = join(dir, "system-prompt.txt");
-					writeFileSync(out, lastRun.systemText, "utf8");
-					// 切了人设但没跑：快照还是上一个 run 的 prompt。notify 里说清它来自哪。
-					ctx.ui.notify(`Effective prompt from the last run written: ${out}`, "info");
-					// 模型真的被告知了什么：同一 run 的文本 + 工具声明 + provider 侧的 system 原文。
-					const sent = join(dir, "sent-to-model.txt");
-					writeFileSync(sent, renderRequestView({
-						systemText: lastRun.systemText,
+					const written: string[] = [];
+					// 逐字：pi 为那次 run 渲染的 system 文本。文件里只有内容，没 banner / 没说明。
+					writeFileSync(join(dir, "system-prompt.txt"), lastRun.systemText, "utf8");
+					written.push("system-prompt.txt");
+					// 逐字：provider 收到的 system 文本 / 工具定义。没捕获到 payload 就不写：注册表里的
+					// 定义不是上线的那一份（provider 层还会改名 / 加 strict / 换字段名），不能冒充。
+					if (lastProvider?.text) {
+						writeFileSync(join(dir, "system-prompt-as-sent.txt"), lastProvider.text, "utf8");
+						written.push("system-prompt-as-sent.txt");
+					}
+					if (lastTools?.tools?.length) {
+						writeFileSync(join(dir, "tools-as-sent.json"), `${JSON.stringify(lastTools.tools, null, 2)}\n`, "utf8");
+						written.push("tools-as-sent.json");
+					}
+					// 注释：来源 / 回退 / 工具摘要。这个文件里没有一个字会上线。
+					writeFileSync(join(dir, "prompt-notes.txt"), renderPromptNotes({
+						at: new Date().toISOString(),
+						persona: current ?? "(none)",
 						mode: lastRun.mode,
+						fallback: lastRun.fallback,
 						declared: lastRun.declared,
 						undeclared: lastRun.undeclared,
 						provider: {
@@ -378,8 +398,13 @@ export default function persona(pi: ExtensionAPI) {
 								? "captured outside an agent run — pi's compaction and summary requests hit the same hook"
 								: undefined,
 						},
+						toolsCapture: lastTools?.tools?.length
+							? lastTools
+							: { note: "not written: no payload captured in this session" },
 					}), "utf8");
-					ctx.ui.notify(`Sent to model written (system text + tool declarations + provider text): ${sent}`, "info");
+					written.push("prompt-notes.txt");
+					// 切了人设但没跑：快照还是上一个 run 的。notify 里说清它来自哪。
+					ctx.ui.notify(`Prompt exports written (${written.join(", ")}) in ${dir}`, "info");
 					if (lastError) {
 						ctx.ui.notify(
 							`persona: 上次 run 渲染失败（${lastError.persona}: ${lastError.message}），导出的是回退后的 prompt`,

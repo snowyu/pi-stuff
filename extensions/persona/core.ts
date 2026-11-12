@@ -342,7 +342,7 @@ export function renderProjectContext(files: PromptFacts["contextFiles"]): string
 	].join("\n\n");
 }
 
-/* ---------------- 请求视图（诊断用，不是 prompt 本身） ---------------- */
+/* ---------------- 导出：逐字内容 + 注释（注释永远不会上线） ---------------- */
 
 /** 一次 run 里真的声明给模型的工具：名字 + 描述 + 参数 schema。 */
 export type DeclaredTool = {
@@ -429,42 +429,74 @@ export function extractProviderSystem(payload: unknown): Omit<ProviderSystem, "m
 	return { text: "", note: `unrecognized payload shape (keys: ${Object.keys(p).join(", ")})` };
 }
 
+/** 从 payload 里拿到的工具定义：原封不动的数组，或者“拿不到”的说明。 */
+export type ProviderTools = { tools?: unknown[]; source?: string; note?: string };
+
 /**
- * 把 system 角色的全貌拼成可读块：文本 + 工具声明（可选再加 provider 侧的原文）。
- *
- * bare 模式下 pi 不发 `<tools>` 段，但工具声明仍然跟着请求走（transcript 里是
- * `{role:"system", content, toolsAdded:[…]}`）；只导出正文会漏掉模型被告知的一半。
- * `system role content` 块是**逐字**的（只多一个分隔空行），banner 形如 `===== label =====`。
+ * 工具声明不做任何加工：payload 里长什么样就出去什么样（Anthropic 是
+ * `{name, description, input_schema}`，OpenAI chat 是 `{type:"function", function:{…}}`，
+ * Google 是 `{functionDeclarations:[…]}`），因为逐字导出才能说“这就是上线的那份”。
  */
-export function renderRequestView(input: {
-	systemText: string;
+export function extractProviderTools(payload: unknown): ProviderTools {
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+		return { note: "unrecognized payload shape (not an object)" };
+	}
+	const tools = (payload as Record<string, unknown>).tools;
+	if (Array.isArray(tools) && tools.length) return { tools: tools as unknown[], source: "payload tools" };
+	return { note: "no tool definitions in the payload" };
+}
+
+/**
+ * 注释文件：所有“不是上线内容”的东西都住在这里。
+ *
+ * 导出的逐字内容（system 文本 / 工具定义）另存文件，文件里不夹 banner、不夹说明；
+ * 这个文件只说：哪几个文件是逐字的、这次是哪个 run / 人设 / 模式、有没有回退、
+ * provider 侧捕获到了什么。工具参数在这里只是摘要（schema 摘要不是 schema），
+ * 逐字的定义在 `tools-as-sent.json`。
+ */
+export function renderPromptNotes(input: {
+	at: string;
+	persona: string;
 	mode: Mode;
+	fallback?: string;
 	declared: DeclaredTool[];
 	undeclared: string[];
-	provider?: ProviderSystem;
+	provider: ProviderSystem;
+	toolsCapture: ProviderTools;
 }): string {
-	const declaredBlock = input.declared.length
-		? input.declared
-			.map((t) => `- ${t.name}\n    description: ${t.description.split("\n").join("\n    ")}`
-				+ `\n    parameters: ${summarizeParameters(t.parameters)}`)
-			.join("\n")
-		: "(none)";
-	const undeclaredBlock = input.undeclared.length ? input.undeclared.map((n) => `- ${n}`).join("\n") : "(none)";
-	const blocks: Array<[string, string]> = [
-		[`system role content (mode: ${input.mode})`, input.systemText],
-		["tools declared to the model", declaredBlock],
-		["registered but not declared", undeclaredBlock],
+	const lines: string[] = [
+		"persona prompt notes: nothing in this file is sent to the model",
+		"",
+		`written: ${input.at}`,
+		`snapshot of: the last agent run of this session (persona: ${input.persona}, mode: ${input.mode})`,
 	];
-	if (input.provider) {
-		const where = [input.provider.model, input.provider.source ? `from ${input.provider.source}` : undefined]
-			.filter((s): s is string => !!s).join(", ");
-		blocks.push([
-			`system text the provider was given${where ? ` (${where})` : ""}`,
-			(input.provider.text || input.provider.note || "(none)")
-				+ (input.provider.caveat ? `\n\n(${input.provider.caveat})` : ""),
-		]);
-	}
-	return blocks.map(([label, body]) => `===== ${label} =====\n${body}\n\n`).join("");
+	if (input.fallback) lines.push(`exported text is a FALLBACK: ${input.fallback}`);
+	lines.push(
+		"",
+		"verbatim files, byte-exact (no banners, no commentary inside them):",
+		"  system-prompt.txt          the system text pi rendered for that run",
+		"  system-prompt-as-sent.txt  the system text the provider was given",
+		"  tools-as-sent.json         the tool definitions the provider was given",
+		"",
+	);
+	lines.push(input.provider.text
+		? `provider system text: from ${input.provider.source ?? "the payload"}`
+			+ (input.provider.model ? ` (${input.provider.model})` : "")
+		: `provider system text: ${input.provider.note ?? "not captured"}`);
+	if (input.provider.caveat) lines.push(`  caveat: ${input.provider.caveat}`);
+	lines.push(input.toolsCapture.tools?.length
+		? `tools-as-sent.json: from the ${input.toolsCapture.source ?? "payload"}`
+		: `tools-as-sent.json: ${input.toolsCapture.note ?? "not written"}`);
+	lines.push("");
+	lines.push(input.declared.length
+		? `tools declared to the model (${input.declared.length}), parameter summaries only:`
+		: "tools declared to the model: (none)");
+	for (const t of input.declared) lines.push(`- ${t.name}  parameters: ${summarizeParameters(t.parameters)}`);
+	lines.push(input.undeclared.length
+		? `registered but not declared: ${input.undeclared.join(", ")}`
+		: "registered but not declared: (none)");
+	lines.push("");
+	return lines.join("\n");
 }
 
 /* ---------------- 段抽取（保守：行锚定 + 唯一性） ---------------- */

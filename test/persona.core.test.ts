@@ -30,21 +30,10 @@ import {
 	personaTools,
 	type PromptFacts,
 	extractProviderSystem,
-	renderRequestView,
+	extractProviderTools,
+	renderPromptNotes,
 	summarizeParameters,
 } from "../extensions/persona/core.ts";
-
-/** Split a rendered request view into its labeled blocks (banner: `===== label =====`). */
-function viewBlocks(text: string): Map<string, string> {
-	const marks = [...text.matchAll(/^===== (.+) =====\n/gm)];
-	const out = new Map<string, string>();
-	marks.forEach((m, i) => {
-		const from = m.index + m[0].length;
-		const to = marks[i + 1]?.index ?? text.length;
-		out.set(m[1]!, text.slice(from, to).replace(/\n\n$/, ""));
-	});
-	return out;
-}
 
 const F: PromptFacts = {
 	cwd: "/proj",
@@ -439,95 +428,64 @@ describe("the request view: the whole system role, not only its text", () => {
 		assert.equal(summarizeParameters({ type: "string" }), "(not an object schema)");
 	});
 
-	test("the view keeps the system text verbatim and puts declarations in their own blocks", () => {
-		const text = renderRequestView({
-			systemText: "You are a pirate.\nTricky  whitespace.  ",
-			mode: "bare",
-			declared: [{
-				name: "read",
-				description: "Read files.",
-				parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-			}],
-			undeclared: ["bash", "edit"],
-		});
-		const blocks = viewBlocks(text);
-		assert.deepEqual([...blocks.keys()], [
-			"system role content (mode: bare)",
-			"tools declared to the model",
-			"registered but not declared",
-		]);
-		assert.equal(blocks.get("system role content (mode: bare)"), "You are a pirate.\nTricky  whitespace.  ");
-		assert.match(
-			blocks.get("tools declared to the model")!,
-			/^- read\n {4}description: Read files\.\n {4}parameters: path\*: string$/,
-		);
-		assert.equal(blocks.get("registered but not declared"), "- bash\n- edit");
-	});
-
-	test("an empty tool set is written out explicitly, not as an empty block", () => {
-		const blocks = viewBlocks(renderRequestView({ systemText: "x", mode: "sections", declared: [], undeclared: [] }));
-		assert.equal(blocks.get("tools declared to the model"), "(none)");
-		assert.equal(blocks.get("registered but not declared"), "(none)");
-	});
-});
-
-describe("the provider payload: the system text the model was handed", () => {
-	test("Anthropic sends the system prompt as blocks, identity injection included", () => {
-		const got = extractProviderSystem({
-			system: [
-				{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
-				{ type: "text", text: "You are a pirate." },
-			],
-		});
-		assert.equal(got.text, "You are Claude Code, Anthropic's official CLI for Claude.\n\nYou are a pirate.");
-		assert.equal(got.source, "system blocks");
-	});
-
-	test("OpenAI chat keeps it as a message, under system or developer", () => {
-		assert.equal(
-			extractProviderSystem({ messages: [{ role: "developer", content: "You are a pirate." }, { role: "user", content: "hi" }] }).text,
-			"You are a pirate.",
-		);
-		assert.equal(
-			extractProviderSystem({ messages: [{ role: "system", content: [{ type: "text", text: "head" }, { type: "text", text: "patch" }] }] }).text,
-			"head\n\npatch",
-		);
-	});
-
-	test("Responses and Codex use instructions, Google uses systemInstruction", () => {
-		assert.equal(extractProviderSystem({ instructions: "You are a pirate." }).text, "You are a pirate.");
-		assert.equal(extractProviderSystem({ systemInstruction: "You are a pirate." }).text, "You are a pirate.");
-		assert.equal(extractProviderSystem({ systemInstruction: { parts: [{ text: "a" }, { text: "b" }] } }).text, "a\n\nb");
-	});
-
-	test("an unrecognized shape is reported, never guessed at", () => {
-		const got = extractProviderSystem({ prompt: "x", foo: 1 });
-		assert.equal(got.text, "");
-		assert.match(got.note ?? "", /unrecognized payload shape \(keys: prompt, foo\)/);
-	});
-
-	test("the sent-to-model view adds that block without touching the other three", () => {
-		const blocks = viewBlocks(renderRequestView({
-			systemText: "You are a pirate.",
-			mode: "bare",
+	test("the notes file says up front that none of it is sent to the model", () => {
+		const notes = renderPromptNotes({
+			at: "2026-01-01T00:00:00.000Z", persona: "pirate", mode: "bare",
 			declared: [{ name: "read", description: "Read files.", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }],
-			undeclared: [],
-			provider: { text: "You are Claude Code.\n\nYou are a pirate.", source: "system blocks", model: "claude-opus-5" },
-		}));
-		assert.deepEqual([...blocks.keys()], [
-			"system role content (mode: bare)",
-			"tools declared to the model",
-			"registered but not declared",
-			"system text the provider was given (claude-opus-5, from system blocks)",
-		]);
-		assert.equal(blocks.get("system text the provider was given (claude-opus-5, from system blocks)"), "You are Claude Code.\n\nYou are a pirate.");
+			undeclared: ["bash"],
+			provider: { text: "sent", source: "system blocks", model: "claude-opus-5" },
+			toolsCapture: { tools: [{ name: "read", input_schema: {} }], source: "payload tools" },
+		});
+		assert.match(notes, /^persona prompt notes: nothing in this file is sent to the model/);
+		assert.match(notes, /^- read  parameters: path\*: string$/m);
+		assert.match(notes, /^registered but not declared: bash$/m);
+		assert.match(notes, /^provider system text: from system blocks \(claude-opus-5\)$/m);
+		assert.match(notes, /^tools-as-sent.json: from the payload tools$/m);
 	});
 
-	test("when the shape was not recognized the view says so in place of the text", () => {
-		const blocks = viewBlocks(renderRequestView({
-			systemText: "x", mode: "sections", declared: [], undeclared: [],
+	test("the notes file names the verbatim files and what was not captured", () => {
+		const notes = renderPromptNotes({
+			at: "x", persona: "(none)", mode: "sections", declared: [], undeclared: [],
+			provider: { text: "", note: "no provider request seen in this session" },
+			toolsCapture: { note: "not written: no payload captured" },
+		});
+		assert.match(notes, /no provider request seen in this session/);
+		assert.match(notes, /tools-as-sent\.json: not written: no payload captured/);
+		assert.match(notes, /verbatim/, "the notes must say which files hold verbatim content");
+	});
+
+	test("a fallback render is flagged in the notes, not hidden in the text", () => {
+		const notes = renderPromptNotes({
+			at: "x", persona: "doomed", mode: "sections",
+			fallback: "persona 'doomed' failed: {{ include not found: x }} - using pi native prompt",
+			declared: [], undeclared: [],
+			provider: { text: "t", source: "system blocks" },
+			toolsCapture: { tools: [{ name: "read" }], source: "payload tools" },
+		});
+		assert.match(notes, /^exported text is a FALLBACK: persona 'doomed' failed/m);
+	});
+
+	test("provider tool definitions come out of the payload untouched", () => {
+		const anthropic = extractProviderTools({ tools: [{ name: "read", description: "d", input_schema: { type: "object" } }] });
+		assert.deepEqual(anthropic.tools, [{ name: "read", description: "d", input_schema: { type: "object" } }]);
+		assert.equal(anthropic.source, "payload tools");
+		const openai = extractProviderTools({ tools: [{ type: "function", function: { name: "read", parameters: {} } }] });
+		assert.equal(openai.source, "payload tools");
+		const google = extractProviderTools({ tools: [{ functionDeclarations: [{ name: "read" }] }] });
+		assert.equal(google.source, "payload tools");
+	});
+
+	test("missing tool definitions are reported, never invented", () => {
+		assert.equal(extractProviderTools({ system: "x" }).note, "no tool definitions in the payload");
+		assert.equal(extractProviderTools({ tools: [] }).note, "no tool definitions in the payload");
+	});
+
+	test("an unrecognized payload shape is reported in the notes", () => {
+		const notes = renderPromptNotes({
+			at: "x", persona: "(none)", mode: "sections", declared: [], undeclared: [],
 			provider: { text: "", note: "unrecognized payload shape (keys: foo)" },
-		}));
-		assert.match(blocks.get("system text the provider was given")!, /unrecognized payload shape/);
+			toolsCapture: { note: "not written: unrecognized payload shape" },
+		});
+		assert.match(notes, /provider system text: unrecognized payload shape \(keys: foo\)/);
 	});
 });

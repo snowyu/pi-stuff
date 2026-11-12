@@ -305,7 +305,7 @@ jinja 引擎（`@isdk/template-engines` 的 `HFTemplate`）**没有语句级 `{%
 | `/persona <name> new` | 切换 + 开新会话（内部 `ctx.newSession()`） |
 | `/persona off` | 交还 pi 原生 |
 | `/persona dirs` | 打印搜索路径 |
-| `/persona prompt` | 写两个文件到 `~/.pi/agent/personas/`：`system-prompt.txt` = **逐字**的 system 角本文本；`sent-to-model.txt` = 模型真的被告知的一切（同一份文本 + 本次 run 真的声明的工具 + provider 侧的 system 原文）。本会话还没跑过 run 时拒绝导出，`/new` 后快照失效 |
+| `/persona prompt` | 导出到 `~/.pi/agent/personas/`，**逐字内容与注释分文件**：`system-prompt.txt`（pi 为那次 run 渲染的 system 文本）、`system-prompt-as-sent.txt` + `tools-as-sent.json`（provider 收到的原文，只在真捕获到 payload 时写）、`prompt-notes.txt`（来源 / 回退 / 工具摘要，全是注释）。本会话还没跑过 run 时拒绝导出，`/new` 后快照失效 |
 | `/persona status` | 当前人设及来源（flag / env / 会话条目 / 文件）、mode、`on_error`、缓存、最近一次错误原文与时间 |
 | `/persona golden` | 在**当前会话**里录一份 `<tools>`/`<rules>` 基线到 `test/fixtures/pi-sections.json`（升级 pi 后校准用） |
 
@@ -318,7 +318,7 @@ jinja 引擎（`@isdk/template-engines` 的 `HFTemplate`）**没有语句级 `{%
 - 每次切换写一条 `custom` 会话条目（`customType: "persona"`，**不进 LLM 上下文**），resume 时还原。
 - 同时写 `personas/current` 文件，跨进程记忆；`/new` 之后仍然保留。
 - **没选 persona 时扩展完全不干预**，`SYSTEM.md` / `--system-prompt` / `APPEND_SYSTEM.md` 照常生效。
-- `/persona prompt` 导出的 `personas/system-prompt.txt` 与 `personas/sent-to-model.txt` 是**诊断产物**，每次写都覆写，不是状态。
+- `/persona prompt` 导出的 `personas/system-prompt.txt`、`personas/system-prompt-as-sent.txt`、`personas/tools-as-sent.json`、`personas/prompt-notes.txt` 是**诊断产物**，每次写都覆写，不是状态。
 - 改 `.md` 立即生效（每个 run 重新读文件）；改 `.ts` 需要 `/reload`。
 
 ## 渲染失败时会发生什么
@@ -350,7 +350,16 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
 
 **不要问模型"你的 system prompt 是什么"**，它会复述、改写、编造。
 
-1. `/persona prompt` → 两个文件：`~/.pi/agent/personas/system-prompt.txt` 是逐字的 system 角本文本（直接 diff / 录 golden 用）；`sent-to-model.txt` 是**模型真的被告知了什么**，四块：文本、`tools declared to the model`（描述 + 参数摘要）、`registered but not declared`、`system text the provider was given`。bare 模式没有 `<tools>` 段，工具信息只在声明这条通道上，所以别看第一份文件就下结论。（切了人设但还没跑，两份都还是**上一个** run 的——notify 会说清。）
+1. `/persona prompt` → 导出。**契约：进过模型的东西与注释分文件，逐字文件里不夹 banner、不夹说明**。
+
+   | 文件 | 内容 | 什么条件下写 |
+   |---|---|---|
+   | `system-prompt.txt` | pi 为那次 run 渲染的 system 文本，逐字 | 总是 |
+   | `system-prompt-as-sent.txt` | provider 收到的 system 文本，逐字 | 真捕获到 payload 时 |
+   | `tools-as-sent.json` | provider 收到的工具定义，payload 里长什么样就写什么样 | 真捕获到 payload 时 |
+   | `prompt-notes.txt` | 注释：哪个 run / 人设 / 模式、是否回退、工具参数摘要、被切掉的工具、捕获从哪来 | 总是 |
+
+   没捕获到 payload 就**不写** provider 那两个文件：注册表里的工具定义不是上线的那一份（provider 层还会改名 / 加 `strict` / 换字段名），拿它冒充逐字内容比不写更坏。工具信息至少能在 `prompt-notes.txt` 里看到摘要——bare 模式没有 `<tools>` 段，工具只走声明这条通道，所以别看 `system-prompt.txt` 就下结论。（切了人设但还没跑，快照还是**上一个** run 的——notes 首行会说清。）
 
    **system 角色在三层被渲染，别把任何一层当成“上线的那一份”**：
 
@@ -360,7 +369,7 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
    | transcript | system 消息 `{role:"system", content, sections, toolsAdded}` | 首条落全部段，之后只落 diff（`content:""` + 变化的段） |
    | provider 层 | `before_provider_request` 的 payload | **逐家不一样**：Anthropic `system: [{type:"text"}]`（OAuth 下前面硬插一条 Claude Code 身份段）、OpenAI chat 一条 `system`/`developer` 角本消息、Responses/Codex `instructions`、Google `systemInstruction`；工具走 `tools` 里的 JSON schema |
 
-   `sent-to-model.txt` 的最后一块取自第三层，所以它是**唯一**能看到 provider 注入内容（如身份段）的地方。抽不到的 shape 会直说 `unrecognized payload shape (keys: …)`，不猜。
+   `system-prompt-as-sent.txt` 取自第三层，所以它是**唯一**能看到 provider 注入内容（如身份段）的地方。抽不到的 shape 会在 notes 里直说 `unrecognized payload shape (keys: …)`，不猜。
 2. `/persona dirs` → 确认人设文件被扫到。
 3. 看请求 payload：临时加一个 `pi.on("before_provider_request", …)` 打印，或用本地 logging 代理 + `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`。
 4. `/persona status` → 看当前人设、来源、mode/on_error、缓存和**最近一次错误原文**（渲染失败不会静默，但通知会过，status 里能回查）。
@@ -403,14 +412,15 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
 9. **sections 名受 pi 约束**。自定义段名必须匹配 `/^[a-z][a-z0-9_-]*$/`，且 `preamble` 保留；写错会在切换时报错，不是静默丢掉。
 10. **其它扩展的 section 会被保留**。注入默认段时会把 `options.sections` 里已有的同名段交回给那个扩展（merge，不是 overwrite），但**同名段只有一个**——两个扩展都想叫 `rules` 时仍是后者胜出，这是 pi 的数据结构，不是本扩展能修的。
 11. **`/persona prompt` 报告的是过去，不是将来**。它导出的是 `turn_end` / `agent_end` 拍的快照。刚切人设还没跑，导出的仍是上一个 run 的 prompt；`/new` 会清掉快照。
-12. **`sent-to-model.txt` 里的参数是摘要，不是 schema 原文**。`parameters: path*: string, tags: string[]` 这种写法是为了可读；嵌套对象只写 `object`，`enum` 列值。要逐字的 tool 定义就得自己抓 payload。工具名与描述取的是 `getActiveTools()` / `getAllTools()`，所以第 4 条的 `hiddenTools` 滞后在这里同样适用。
-13. **provider 那一块不是永远有内容**。`onPayload` 只有真的 provider serializer 会调（`anthropic-messages.js` 等），脚本化 / 离线 provider 不调，那时块里写 `no provider request seen in this session`。另外同一条 hook 也会被 compaction / 摘要请求命中，所以捕获不在 agent run 窗口内时会标 `captured outside an agent run`。
+12. **`prompt-notes.txt` 里的参数是摘要，不是 schema 原文**。`parameters: path*: string, tags: string[]` 这种写法是为了可读；嵌套对象只写 `object`，`enum` 列值。逐字的定义在 `tools-as-sent.json`（只在真捕获到 payload 时才有）。notes 里的工具名与描述取的是 `getActiveTools()` / `getAllTools()`，所以第 4 条的 `hiddenTools` 滞后在这里同样适用；`tools-as-sent.json` 取的是 payload，不受这个滞后影响。
+13. **provider 那两个文件不是永远有**。`onPayload` 只有真的 provider serializer 会调（`anthropic-messages.js` 等），脚本化 / 离线 provider 不调，那时两个文件不写，notes 里写 `no provider request seen in this session`。另外同一条 hook 也会被 compaction / 摘要请求命中，所以捕获不在 agent run 窗口内时 notes 会多一行 `caveat: captured outside an agent run`。
 
 ## 设计决策
 
 - **为什么 `/persona prompt` 用快照而不是 `ctx.getSystemPrompt()`**：pi 只把 `before_agent_start` 的修改存在 run 作用域里（`_runSystemPromptOptions`，注释写着 "for the active run"，run 的 `finally` 里清成 `undefined`），而 `getSystemPrompt()` 是**现渲染**：`buildSystemPrompt(_runSystemPromptOptions ?? _baseSystemPromptOptions)`。斜杠命令必在 idle 时执行，所以命令里拿到的一律是 base options 的渲染 = pi 原生 prompt。于是只能在 run 里抓：`turn_end` / `agent_end` 抓的是 pi **定稿 `selectedTools` / `hiddenTools` 之后**的渲染，比 handler 时刻更接近模型真看到的。不取 `lastRendered`：那是我们自己设的 `customPrompt`，pi 还会在后面追加 `<cwd>` 等段，不是完整 prompt。
-- **为什么导出叫 `sent-to-model.txt` 而不叫 wire / payload**：使用者要的是“模型真的被告知了什么”，不是 pi 内部的 event 名。同理不要求记住 flag：`/persona prompt` 一次写两份，逐字文本与完整视图各一份。
-- **为什么 `sent-to-model.txt` 要把工具声明一并导出**：system 角色不等于 system 文本。front-matter 的 `tools:` 走 `systemPromptOptions.selectedTools`，改的是**请求里的工具声明**；transcript 里那一条是 `{role:"system", content, toolsAdded:[…]}`，bare 模式下 `_installAgentForcedPromptProjection` 把 forced text 投影到这条 head 上、`toolsAdded` 原样带走。所以 `mode: bare` 的人设看起来“什么都没带”，其实模型拿到了整套工具 schema（真 pi 进程实测：`pirate` 的 system 文本 124 字，同一请求里声明了 4 个工具）。`system-prompt.txt` 保持逐字不变（能 diff、能录 golden），多出来的视图另写一份。
+- **为什么不叫 wire / payload**：使用者要的是“模型真的被告知了什么”，不是 pi 内部的 event 名；也不要求记住 flag：`/persona prompt` 一次写齐。
+- **为什么逐字内容和注释必须分文件**：一个文件里既放上线文本又放摘要与告警，读的人就没法判断哪一段真进了模型——把 `parameters: path*: string` 这种摘要当成上线的 schema、把告警当成 prompt 的一部分，都是会真实伤害排查的误读。所以规则是：逐字文件里**只有**内容（没 banner、没说明，可以直接 diff / 录 golden），其余一律进 `prompt-notes.txt`，且 notes 首行自报“这个文件里没有一个字会上线”。
+- **为什么要把工具声明一并导出**：system 角色不等于 system 文本。front-matter 的 `tools:` 走 `systemPromptOptions.selectedTools`，改的是**请求里的工具声明**；transcript 里那一条是 `{role:"system", content, toolsAdded:[…]}`，bare 模式下 `_installAgentForcedPromptProjection` 把 forced text 投影到这条 head 上、`toolsAdded` 原样带走。所以 `mode: bare` 的人设看起来“什么都没带”，其实模型拿到了整套工具 schema（真 pi 进程实测：`pirate` 的 system 文本 124 字，同一请求里声明了 4 个工具）。逐字定义在 `tools-as-sent.json`，摘要在 `prompt-notes.txt`；`system-prompt.txt` 仍然只有文本。
 - **为什么 `/persona prompt` 不自动发一条探针消息**：`pi.sendUserMessage()` 能做到，但那是一次真 run——花 provider 调用、往 transcript 里塞一条会被 pirate 认真回答的 "hi"、还得 `waitForIdle()`。而且信息量并不增加（任何 run 都会抓快照），失败时反而更糟：探针那轮如果渲染失败，快照就是回退后的原生 prompt，会被当成"生效 prompt"导出。也没有免模型的路子：`buildSystemPrompt` 不在包导出里，而 pi 的 `exports` 只允许 `.` 和 `./rpc-entry`（`ERR_PACKAGE_PATH_NOT_EXPORTED`），自己拼段就是再抄一遍 pi 的拼装规则。所以冷启动直接拒绝：“先发一条消息再试”。
 
 - **为什么直接用 `HFTemplate` 而不是 `StringTemplate`**：后者是异步统一层，且默认 `expandValue: true` 会把注入值里的 `{{ }}` 当模板**二次渲染**（AGENTS.md、pi 文档里很容易出现），默认 `tagFinalString: true` 还可能返回 boxed `String`。直接用 `HFTemplate` 同步渲染，这三个问题一次消失。将来要加多引擎，再换 `StringTemplate.format` 并显式设 `expandValue: false, tagFinalString: false`。

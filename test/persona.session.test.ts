@@ -63,14 +63,24 @@ function stateFile(agentDir: string): string {
 	return join(agentDir, "personas", "current");
 }
 
-/** Where `/persona prompt` writes the verbatim system text. */
+/** Verbatim: the system text pi rendered for the last run. */
 function promptFile(agentDir: string): string {
 	return join(agentDir, "personas", "system-prompt.txt");
 }
 
-/** Where `/persona prompt` writes what was really sent to the model. */
+/** Verbatim: the system text the provider was given. Only written when a payload was captured. */
 function sentFile(agentDir: string): string {
-	return join(agentDir, "personas", "sent-to-model.txt");
+	return join(agentDir, "personas", "system-prompt-as-sent.txt");
+}
+
+/** Verbatim JSON: the tool definitions the provider was given. Only when a payload was captured. */
+function toolsFile(agentDir: string): string {
+	return join(agentDir, "personas", "tools-as-sent.json");
+}
+
+/** Commentary: provenance, fallbacks, tool summaries. Nothing in it is sent to the model. */
+function notesFile(agentDir: string): string {
+	return join(agentDir, "personas", "prompt-notes.txt");
 }
 
 /** Run the registered slash command the way pi's TUI would. */
@@ -473,7 +483,7 @@ describe("persona in a real pi session", () => {
 			assert.match(exported, /You are a pirate coding matey/);
 			assert.ok(!exported.includes("coding assistant running inside pi"), "the persona prompt must be the export");
 			assert.match(exported, /<cwd>/, "the export is pi's full render, not just the preamble we set");
-			assert.ok(notes(session).some((n) => /Effective prompt from the last run written/.test(n)));
+			assert.ok(notes(session).some((n) => /Prompt exports written/.test(n)));
 		} finally {
 			session.dispose();
 		}
@@ -527,7 +537,11 @@ describe("persona in a real pi session", () => {
 			const exported = readFileSync(promptFile(agentDir), "utf8");
 			assert.match(exported, /pirate coding matey/, "the export is what the last run used");
 			assert.ok(!exported.includes("senior code reviewer"), "nothing unrendered may be presented as effective");
-			assert.ok(notes(session).some((n) => /last run/.test(n)), "the notify names the run the export came from");
+			assert.match(
+				readFileSync(notesFile(agentDir), "utf8"),
+				/^snapshot of: the last agent run of this session/m,
+				"the notes name the run the export came from",
+			);
 		} finally {
 			session.dispose();
 		}
@@ -557,10 +571,10 @@ describe("persona in a real pi session", () => {
 		}
 	});
 
-	test("/persona prompt also exports the tool declarations the request carries", async () => {
+	test("without a captured payload, the tool declarations stay in the notes file", async () => {
 		// bare mode sends no `<tools>` section, but front-matter `tools:` still reaches the model as tool
 		// declarations on the system message (`{role:"system", content, toolsAdded:[…]}`), so the text
-		// alone is not the whole system role.
+		// alone is not the whole system role — and a summary of it must not pose as a verbatim export.
 		const lean = "---\nmode: bare\ntools: [read]\n---\nYou are a lean pirate.\n";
 		const agentDir = tempAgentDir({ lean });
 		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
@@ -569,21 +583,52 @@ describe("persona in a real pi session", () => {
 			await session.run(when("hi", [says("arr")]));
 			await runCommand(session, "persona", "prompt");
 
-			const view = readFileSync(sentFile(agentDir), "utf8");
-			assert.match(view, /^===== system role content \(mode: bare\) =====$/m);
-			assert.match(view, /^===== tools declared to the model =====$/m);
-			assert.match(view, /^===== registered but not declared =====$/m);
+			const noteText = readFileSync(notesFile(agentDir), "utf8");
+			assert.match(noteText, /^persona prompt notes: nothing in this file is sent to the model/);
+			assert.match(noteText, /^- read  parameters: path\*: string/m, "the model sees the parameter schema, so it gets reported");
+			assert.ok(!/^- bash  parameters/.test(noteText), "front-matter tools: decides what is declared");
+			assert.match(noteText, /^registered but not declared: .*\bbash\b/m, "and what got cut is visible too");
+			assert.match(noteText, /tools-as-sent\.json: not written/);
 
-			const at = (label: string) => view.indexOf(`===== ${label} =====`);
-			const declared = view.slice(at("tools declared to the model"), at("registered but not declared"));
-			assert.match(declared, /^- read$/m, "the declared tool is listed with its schema");
-			assert.match(declared, /parameters: path\*: string/, "the model sees the parameter schema, so it gets reported");
-			assert.ok(!/^- bash$/m.test(declared), "front-matter tools: decides what is declared");
-			assert.match(view.slice(at("registered but not declared")), /^- bash$/m, "and what got cut is visible too");
+			// The verbatim artifacts hold nothing but content.
+			assert.equal(readFileSync(promptFile(agentDir), "utf8"), "You are a lean pirate.");
+			assert.ok(!existsSync(sentFile(agentDir)), "no payload, no provider-side file");
+			assert.ok(!existsSync(toolsFile(agentDir)), "a registry guess is not a verbatim tool definition");
+			assert.ok(notes(session).some((n) => /Prompt exports written/.test(n)), "the notify names the files");
+		} finally {
+			session.dispose();
+		}
+	});
 
-			// The byte-exact artifact must stay byte-exact: no banners in it.
-			assert.equal(readFileSync(promptFile(agentDir), "utf8").trimEnd(), "You are a lean pirate.");
-			assert.ok(notes(session).some((n) => /Sent to model written/.test(n)), "the notify names both files");
+	test("a captured payload is exported verbatim, content only", async () => {
+		const lean = "---\nmode: bare\ntools: [read]\n---\nYou are a lean pirate.\n";
+		const agentDir = tempAgentDir({ lean });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "lean");
+			await session.run(when("hi", [says("arr")]));
+			const runner = session.session.extensionRunner as ExtensionRunner;
+			const blocks = [
+				{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+				{ type: "text", text: "You are a lean pirate." },
+			];
+			const tools = [{ name: "read", description: "Read the contents of a file.", input_schema: { type: "object" } }];
+			await runner.emitBeforeProviderRequest({ system: blocks, tools });
+			await runCommand(session, "persona", "prompt");
+
+			// Byte-exact: the file is the payload's system text and nothing else — no banner, no note.
+			assert.equal(
+				readFileSync(sentFile(agentDir), "utf8"),
+				"You are Claude Code, Anthropic's official CLI for Claude.\n\nYou are a lean pirate.",
+			);
+			// Byte-exact JSON: the payload's own tool definitions, unsummarized.
+			assert.deepEqual(JSON.parse(readFileSync(toolsFile(agentDir), "utf8")), tools);
+
+			// Everything that explains the export lives in the notes file.
+			const notes = readFileSync(notesFile(agentDir), "utf8");
+			assert.match(notes, /^provider system text: from system blocks/m);
+			assert.match(notes, /^tools-as-sent\.json: from the payload tools$/m);
+			assert.match(notes, /caveat: captured outside an agent run/, "a payload seen while idle must not pass itself off as the run's");
 		} finally {
 			session.dispose();
 		}
@@ -622,41 +667,15 @@ describe("persona in a real pi session", () => {
 	});
 });
 
-	test("sent-to-model.txt says so when no provider request happened", async () => {
+	test("when no provider request happened, the notes say so and nothing is invented", async () => {
 		const agentDir = tempAgentDir({ pirate: PIRATE });
 		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
 		try {
 			await runCommand(session, "persona", "pirate");
 			await session.run(when("hi", [says("ahoy")]));
 			await runCommand(session, "persona", "prompt");
-			assert.match(readFileSync(sentFile(agentDir), "utf8"), /no provider request seen in this session/);
-		} finally {
-			session.dispose();
-		}
-	});
-
-	test("sent-to-model.txt carries the system text the provider was actually given", async () => {
-		const agentDir = tempAgentDir({ pirate: PIRATE });
-		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
-		try {
-			await runCommand(session, "persona", "pirate");
-			await session.run(when("hi", [says("ahoy")]));
-			// The scripted harness provider builds no payload, so drive the hook the way the provider
-			// layer does: Anthropic sends `system` as blocks and injects an identity block that pi's own
-			// rendering never contains — the payload view is the only place it shows up.
-			const runner = session.session.extensionRunner as ExtensionRunner;
-			await runner.emitBeforeProviderRequest({
-				system: [
-					{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
-					{ type: "text", text: "You are a pirate coding matey." },
-				],
-			});
-			await runCommand(session, "persona", "prompt");
-
-			const view = readFileSync(sentFile(agentDir), "utf8");
-			assert.match(view, /^===== system text the provider was given/m);
-			assert.match(view, /You are Claude Code, Anthropic's official CLI for Claude\./, "an injected identity block only shows in the payload view");
-			assert.match(view, /captured outside an agent run/, "a payload seen while idle must not pass itself off as the run's");
+			assert.match(readFileSync(notesFile(agentDir), "utf8"), /no provider request seen in this session/);
+			assert.ok(!existsSync(sentFile(agentDir)), "no payload captured, so no provider-side file");
 		} finally {
 			session.dispose();
 		}
