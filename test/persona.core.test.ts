@@ -336,9 +336,20 @@ describe("shipped personas (personas/*.md)", () => {
 		}
 	};
 
-	test("the directory holds the personas and fragments the docs promise", () => {
-		assert.deepEqual(names, ["default", "pirate", "pirate-plus", "reviewer"]);
-		assert.ok(files.includes("_tools.md") && files.includes("_rules.md") && files.includes("_docs.md"));
+	test("the directory is self-consistent and keeps the promises the docs make", () => {
+		// 故意不枚举人设名字：出厂集合会长，新增人设不该要求改这个文件。这里钉的是契约，不是名单。
+		assert.ok(names.length > 0, "personas/ holds no persona at all");
+		for (const name of names) {
+			assertSafeName(name);
+			assert.equal(isReserved(name), false, `${name} collides with a subcommand word`);
+		}
+		// docs/persona.md 点名了这些片段（`_docs.md` 那段告警）和 `/persona default`。
+		for (const fragment of ["_tools.md", "_rules.md", "_docs.md"]) {
+			assert.ok(files.includes(fragment), `docs/persona.md references ${fragment}, but personas/ has no such file`);
+		}
+		const docs = readFileSync(new URL("../docs/persona.md", import.meta.url).pathname, "utf8");
+		assert.ok(names.includes("default"), "docs/persona.md offers /persona default, but personas/default.md is missing");
+		assert.match(docs, /\/persona default/, "personas/default.md exists but the quick list no longer offers it");
 	});
 
 	test("every fragment parses and renders standalone", () => {
