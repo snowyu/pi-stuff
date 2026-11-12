@@ -18,6 +18,8 @@ pi config                                    # toggle individual resources
 | Path | |
 |---|---|
 | [`extensions/proxy-guard.ts`](extensions/proxy-guard.ts) | keep web tools working when the configured proxy is down; switch proxy/direct per run — [docs](docs/proxy-guard.md) |
+| [`extensions/persona.ts`](extensions/persona.ts) | swap pi's preamble for a persona file; optional `{{tools}}`/`{{rules}}`/`{{docs}}` borrowed from pi — [docs](docs/persona.md) |
+| [`personas/`](personas) | the personas the extension above ships with (`default`, `reviewer`, `pirate`); pi ignores this directory, a project's `.pi/personas` overrides it |
 | `skills/` `prompts/` `themes/` | empty for now; pi discovers resources from these directories automatically |
 | [`docs/extension-conventions.md`](docs/extension-conventions.md) | how an extension in this package is written, configured, documented and reviewed |
 | [`docs/testing.md`](docs/testing.md) | the three test tiers, isolation rules, test-runner choice |
@@ -30,7 +32,9 @@ pi config                                    # toggle individual resources
 pi-stuff/
 ├── package.json              # keywords: ["pi-package"]; pi in peerDependencies, never dependencies
 ├── extensions/               # auto-discovered: every .ts/.js here becomes an extension
-│   └── proxy-guard.ts
+│   ├── proxy-guard.ts
+│   └── persona.ts
+├── personas/                 # data for persona.ts: <name>.md becomes the system prompt
 ├── docs/                     # one doc per extension + conventions + testing guide
 ├── templates/                # copy these when adding an extension
 ├── test/                     # tier 1 + tier 2, plus test/fixtures/ and test/real/ (tier 3)
@@ -46,9 +50,9 @@ Nothing goes in `extensions/` except extensions: pi loads every file there. Shar
 
 ```sh
 npm install          # also patches the tier-2 harness for pi 1.x (see docs/testing.md)
-npm test             # tier 1 + 2: 33 tests, ~0.7 s, no child processes
-npm run test:real    # tier 3: real pi process per scenario (~0.4 s each)
-npm run test:all     # both: 35 tests
+npm test             # tier 1 + 2: 104 tests, ~0.7 s, no child processes
+npm run test:real    # tier 3: real pi process per scenario (~0.3 s each)
+npm run test:all     # both: 112 tests
 npm run test:watch
 npm run typecheck    # tsc --noEmit against pi's own types
 ```
@@ -66,6 +70,7 @@ npm run typecheck    # tsc --noEmit against pi's own types
 - Host-provided packages (`@earendil-works/pi-coding-agent`, `pi-ai`, `pi-agent-core`, `pi-tui`,
   `typebox`) are `peerDependencies` with `"*"` and `devDependencies` for tests — never
   `dependencies`, where a physical copy could duplicate pi's classes at runtime.
-- Runtime state (for example `~/.pi/agent/proxy-guard.json`) lives outside this repo.
+- Runtime state (for example `~/.pi/agent/proxy-guard.json`, `~/.pi/agent/personas/current`) lives
+  outside this repo.
 - Do not keep a loose copy of an extension in `~/.pi/agent/extensions/` while also loading it through
   this package: it would load twice.

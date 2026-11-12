@@ -35,8 +35,11 @@ import { Type } from "typebox";                                      // tool par
 
 Rules that make an extension testable and safe:
 
-- **`import type` for pi imports.** The only pi import must be a type import, so a test can import
-  the file with Node's TypeScript stripping and no pi runtime.
+- **Type-only where the types are all you need; never copy pi instead.** `import type` lets a test load
+  the file with Node's TypeScript stripping and no pi runtime (~400 ms of import cost, per file). That
+  speed is a bonus, not a rule worth breaking: when you need pi at runtime, import its exported helper
+  (`getAgentDir()`, `SessionManager`, …). A hand-rolled copy of pi's logic is a bug waiting for the next
+  pi release.
 - **Pure core.** The interesting decision takes plain data and returns plain data
   (`decideProxyCall({ mode, override, configured, reachable }) → { inject?, note, notify? }`).
   Handlers then only translate events → core call → mutation/notify.
@@ -67,11 +70,17 @@ Rules that make an extension testable and safe:
 |---|---|---|
 | Per-user config/state | `<agent dir>/<name>.json` | `<agent dir>` = `PI_CODING_AGENT_DIR`, else `$XDG_CONFIG_HOME/pi`, else `~/.pi/agent`. Resolve it the same way pi itself does, at call time. |
 | One-shot overrides | `PI_STUFF_<NAME>_*` env vars | `_<MODE>`, `_DISABLE=1`, `_DEBUG=<file>` |
+| Data the extension ships | `<plural>/` next to `extensions/` (for example `personas/`) | pi discovers nothing there, it is yours; find it from `dirname(fileURLToPath(import.meta.url))` and document every search path |
 | Anything else | nowhere | no secrets, no caches, no logs inside the repo |
 
 Conventions:
 
 - Missing, empty or corrupt state file ⇒ defaults, never an exception.
+- For pi's own directories, call pi's helper (`getAgentDir()`), do not restate its rule. Copy a rule
+  only when you are matching somebody else's config resolution — the four lines below exist because
+  proxy-guard has to find the directory *pi-web-access* reads, which is not the same question.
+- A single string or boolean does not need a JSON file: a plain file beside the data it belongs to is
+  fine, as long as the docs say where it lives.
 - Write atomically-enough: read-modify-write the whole object, add `updatedAt`, and `JSON.stringify(…, null, 2)`.
 - Before rewriting a file you do not own: copy it to `<file>.bak`, keep unrelated keys, refuse to
   rewrite something that is not a JSON object.

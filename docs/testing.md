@@ -1,7 +1,7 @@
 # Testing extensions
 
-Three tiers, all offline and with **no LLM calls**. Measured here: 33 fast tests in ~0.7 s
-(`npm test`), plus 2 real-process scenarios in ~1 s (`npm run test:real`).
+Three tiers, all offline and with **no LLM calls**. Measured here: 104 fast tests in ~0.8 s
+(`npm test`), plus 8 real-process scenarios in ~1.9 s (`npm run test:real`).
 
 ```sh
 npm test              # tier 1 + tier 2 (fast, no child processes)      → test/*.test.ts
@@ -70,6 +70,27 @@ assert.equal(proxySeenByTool(session, "fetch_content"), "");          // forced 
 assert.equal(proxySeenByTool(session, "fetch_content"), undefined);   // untouched
 ```
 
+The same idea works on the prompt. `test/fixtures/prompt-capture.ts` registers a
+`before_agent_start` handler and records `systemPromptOptions.customPrompt`, the rendered
+`event.systemPrompt` and `pi.getActiveTools()`: pi gives every handler the same mutable options
+object, so a fixture listed **after** the extension under test sees exactly what that extension did.
+Its captures live on a `globalThis` key, because pi loads extensions with its own loader — the test's
+`import` of the fixture is a different module instance and shares nothing with it.
+
+Two things this fixture exists to make visible, both easy to get wrong:
+
+- the capture is the **handler-time** view. pi replaces `selectedTools` with `getActiveToolNames()`,
+  re-reads `hiddenTools` and runs `prepareLoadout` after the handlers return; the session's own
+  `systemPrompt` getter (and `getSystemPrompt(run)` in tier 3) is the post-handler view.
+  `test/fixtures/tool-loadout.ts` narrows the loadout from a handler to pin that one-step lag.
+- the tool loadout lives on the extension API (`pi.getActiveTools()` / `pi.setActiveTools()`), not on
+  the `ctx` event handlers get: `setActiveTools` on the command context only.
+
+One trap in tier 2: the harness builds its session with `SessionManager.inMemory()`, which reports
+`process.cwd()`, not the `cwd` option. Anything the extension resolves from
+`ctx.sessionManager.getCwd()` (project config, project personas) is the repository in tier 2 and the
+scenario workspace in tier 3 — so test that part against a real process.
+
 **Known issue — the harness needs a patch on pi 1.x.** Version 0.6.1 was released against pi
 0.74/0.75. `scripts/patch-pi-test-harness.mjs` (wired to `postinstall`) fixes four breakages:
 
@@ -120,7 +141,9 @@ assert.match(getToolResultText(run, "call-1"), /"proxy":""/);
 ```
 
 Every run writes artifacts under `.tmp/test-runs/<testName>/` (`run.jsonl`, trace events, stdout/stderr)
-and can be re-read without starting pi: `PiRun.open(run.artifacts.directory)`. Use `providerMode:
+and can be re-read without starting pi: `PiRun.open(run.artifacts.directory)`. Assertion helpers cover
+the prompt too — `getSystemPrompt(run)` is the effective prompt of the real run, which is how
+`test/real/persona.real.test.ts` proves the persona reached a real process. Use `providerMode:
 "user"` plus your real model only when you actually want real model output — that is not a test, it is
 an evaluation, and it is not reproducible.
 

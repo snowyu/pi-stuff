@@ -6,7 +6,7 @@
  * set to "read-only", with the mode in `<agent dir>/template.json` and `/template [read-only|edit|status]`.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"; // type-only: tests import this file without pi
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"; // the types are all this sample needs from pi
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +31,8 @@ export function decideToolCall(toolName: string, mode: Mode, mutating: ReadonlyS
 
 /* --------------------------------------------------------------- thin I/O */
 
+/** Where this extension keeps its own state. To read pi's own directories, import pi's
+ * `getAgentDir()` instead of restating this rule (docs/extension-conventions.md §4). */
 function agentDir(): string {
 	const explicit = process.env.PI_CODING_AGENT_DIR;
 	if (explicit) return explicit;
