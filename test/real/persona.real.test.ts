@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
 
-const EXTENSION = new URL("../../extensions/persona.ts", import.meta.url).pathname;
+const EXTENSION = new URL("../../extensions/persona", import.meta.url).pathname;
 
 /**
  * A throwaway agent dir: pi and persona both read PI_CODING_AGENT_DIR, and an empty `packages`
@@ -61,7 +61,7 @@ describe("persona against a real pi process", () => {
 
 		const prompt = getSystemPrompt(run);
 		assert.match(prompt, /pirate coding matey/);
-		assert.ok(!prompt.includes("expert coding assistant"), "the persona preamble replaces pi's own");
+		assert.ok(!prompt.includes("coding assistant running inside pi"), "the persona preamble replaces pi's own");
 		assert.ok(!prompt.includes("{{"), "no placeholder may reach the model");
 	});
 
@@ -118,13 +118,15 @@ describe("persona against a real pi process", () => {
 		assert.match(getSystemPrompt(run), /pirate coding matey/);
 	});
 
-	test("with --system-prompt there is nothing to borrow: the template degrades to its own text", async () => {
-		// pi builds <tools>/<rules>/<docs> only when no custom prompt exists, so this is the case the
-		// placeholders must survive by disappearing, not by staying literal.
+	test("with --system-prompt there is no pi docs to borrow: the guarded wrapper disappears", async () => {
+		// pi builds <tools>/<rules>/<docs> only when no custom prompt exists. The extension re-assembles
+		// tools and rules from structured facts, but docs is extraction-first and stays empty — so the
+		// author guards it, exactly like the shipped fragments do. An unguarded empty wrapper would claim
+		// a section pi never had.
 		const shared = mkdtempSync(join(tmpdir(), "pi-stuff-persona-real-shared-"));
 		writeFileSync(
 			join(shared, "bare.md"),
-			"You are the bare captain.\n\n<docs>\n{{docs}}\n</docs>\n\nWorkdir: {{cwd}}\n",
+				"You are the bare captain.\n\n{% if docs %}\n<docs>\n{{ docs }}\n</docs>\n{% endif %}\n\nWorkdir: {{ cwd }}\n",
 		);
 
 		const { run, workspace } = await runPersonaScenario(
@@ -138,7 +140,8 @@ describe("persona against a real pi process", () => {
 		assert.match(prompt, /bare captain/);
 		assert.ok(!prompt.includes("--system-prompt"), "the persona replaces the custom prompt, it does not stack on it");
 		assert.ok(!prompt.includes("{{"), "no placeholder syntax may reach the model");
-		assert.ok(!prompt.includes("<docs>"), "the empty wrapper is removed with the placeholder");
+		assert.ok(!prompt.includes("<docs>"), "the guarded wrapper disappears with the empty value");
+		assert.match(prompt, /- read:/, "the tool list survives when the persona asks for it: it is re-assembled, not borrowed from pi's text");
 		assert.ok(prompt.includes(workspace), "{{cwd}} always has a value: it is not a borrowed section");
 	});
 
@@ -146,7 +149,7 @@ describe("persona against a real pi process", () => {
 		const { run } = await runPersonaScenario("no-persona");
 
 		const prompt = getSystemPrompt(run);
-		assert.match(prompt, /expert coding assistant/);
+		assert.match(prompt, /coding assistant running inside pi/);
 		assert.match(prompt, /<tools>/);
 		assert.ok(!prompt.includes("pirate coding matey"));
 	});

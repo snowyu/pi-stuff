@@ -1,15 +1,17 @@
 /**
- * Session-level tests with @marcfargas/pi-test-harness: a real pi session in process, the real
- * persona extension, and a scripted model instead of an LLM. Zero network, zero model calls.
+ * Tier 2: persona inside a real pi session driven by @marcfargas/pi-test-harness — a real extension
+ * load, real `session_start`, real `before_agent_start`, and a scripted model instead of an LLM.
+ * Zero network, zero model calls.
  *
- * These prove what unit tests cannot: pi loads the extension, `session_start` picks the persona up,
- * `/persona` is registered, and the prompt the run actually starts with is the rendered template —
- * including pi's own `<tools>`, `<rules>` and `<docs>` sections substituted into `{{...}}`.
+ * What this tier proves that tier 1 cannot: pi loads `extensions/persona/index.ts`, picks the persona
+ * up from `--persona` / `PI_PERSONA` / the session entry / `personas/current`, and the prompt a run
+ * really starts with is the rendered template with pi's structured facts substituted in. It also
+ * pins the failure posture (`on_error: last` reusing the previous render, `native` falling back)
+ * which only exists once real handlers run.
  *
  * The project directory (`<cwd>/.pi/personas`) is not covered here: the harness builds its session
- * with `SessionManager.inMemory()`, which reports `process.cwd()` rather than the temp cwd, so
- * `ctx.sessionManager.getCwd()` is not the session's project. Test that search order against a real
- * pi process instead (test/real/persona.real.test.ts).
+ * with `SessionManager.inMemory()`, which reports `process.cwd()` rather than the temp cwd. Test that
+ * search order against a real pi process instead (test/real/persona.real.test.ts).
  *
  * Requires scripts/patch-pi-test-harness.mjs (run by `postinstall`) until upstream supports pi 1.x.
  */
@@ -23,13 +25,13 @@ import type { ExtensionRunner } from "@earendil-works/pi-coding-agent";
 
 import { CAPTURES_KEY, type PromptCapture } from "./fixtures/prompt-capture.ts";
 
-const PERSONA = new URL("../extensions/persona.ts", import.meta.url).pathname;
+const PERSONA = new URL("../extensions/persona/index.ts", import.meta.url).pathname;
 const CAPTURE = new URL("./fixtures/prompt-capture.ts", import.meta.url).pathname;
 const LOADOUT = new URL("./fixtures/tool-loadout.ts", import.meta.url).pathname;
 
-/** A persona that borrows pi's tool list and rules and adds one of its own. */
-const PIRATE = "You are a pirate coding matey. End every reply with \"Arrr!\".\n\n<tools>\n{{tools}}\n</tools>\n";
-const REVIEWER = "You are a senior code reviewer.\n\n<rules>\n{{rules}}\n- Read the whole file before commenting.\n</rules>\n";
+/** Sections-mode persona: pi wraps the default sections, the body is only the preamble. */
+const PIRATE = "You are a pirate coding matey. End every reply with \"Arrr!\"\n";
+const REVIEWER = "---\ndescription: reviewer\n---\nYou are a senior code reviewer.\n\n{{ rules }}\n";
 
 /* Persona state and search paths are read from PI_CODING_AGENT_DIR / PI_PERSONAS_PATH / PI_PERSONA,
    all process-global: save and restore exactly like the proxy-guard tests do. */
@@ -77,6 +79,10 @@ function lastNote(session: TestSession): string {
 	return notes(session).at(-1) ?? "";
 }
 
+function statusLine(session: TestSession): unknown[] | undefined {
+	return session.events.uiCallsFor("setStatus").at(-1)?.args;
+}
+
 describe("persona in a real pi session", () => {
 	beforeEach(() => {
 		(globalThis as Record<string, unknown>)[CAPTURES_KEY] = [];
@@ -87,41 +93,39 @@ describe("persona in a real pi session", () => {
 		tempAgentDir({});
 	});
 
-	test("with no persona chosen, the prompt is pi's own", async () => {
+	test("with no persona chosen, the prompt is pi's own and the extension stays silent", async () => {
 		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
 		try {
 			await session.run(when("hi", [says("ahoy")]));
-			const [first] = captures();
 			assert.equal(captures().length, 1);
-			assert.equal(first.customPrompt, undefined, "nothing may be set on systemPromptOptions");
-			assert.match(first.prompt, /expert coding assistant/);
-			assert.match(first.prompt, /<tools>/);
+			assert.equal(captures()[0].customPrompt, undefined, "nothing may be set on systemPromptOptions");
+			assert.match(captures()[0].prompt, /coding assistant running inside pi/);
+			assert.match(captures()[0].prompt, /<tools>/);
 			assert.equal(notes(session).length, 0, "an extension that does nothing must stay silent");
 		} finally {
 			session.dispose();
 		}
 	});
 
-	test("/persona pirate rewrites the next run's prompt", async () => {
+	test("/persona pirate rewrites the next run's prompt and keeps pi's tool list", async () => {
 		tempAgentDir({ pirate: PIRATE });
 		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
 		try {
 			await runCommand(session, "persona", "pirate");
 			await session.run(when("hi", [says("ahoy")]));
 
-			const [first] = captures();
-			assert.match(first.customPrompt ?? "", /pirate coding matey/);
-			assert.match(first.prompt, /You are a pirate coding matey/);
-			// {{tools}} came out of pi's own <tools> section, placeholder and tags gone.
-			assert.ok(!first.prompt.includes("{{tools}}"), "placeholder must be substituted");
-			assert.match(first.prompt, /In addition to the tools above/);
-			assert.match(lastNote(session), /persona: pirate/);
+			assert.match(captures()[0].prompt, /You are a pirate coding matey/);
+			assert.match(captures()[0].prompt, /- read: /, "the persona asks for the tool list and gets it");
+			assert.match(captures()[0].prompt, /Additional tools may be available\./);
+			assert.ok(!captures()[0].prompt.includes("{{"), "no placeholder may reach the model");
+			assert.match(lastNote(session), /Persona: pirate/);
+			assert.deepEqual(statusLine(session), ["persona", "persona: pirate"]);
 		} finally {
 			session.dispose();
 		}
 	});
 
-	test("the persona survives later turns in the same session", async () => {
+	test("the persona survives later turns, and its sections are re-rendered every run", async () => {
 		tempAgentDir({ reviewer: REVIEWER });
 		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
 		try {
@@ -131,9 +135,8 @@ describe("persona in a real pi session", () => {
 			assert.equal(captures().length, 2);
 			for (const capture of captures()) {
 				assert.match(capture.customPrompt ?? "", /senior code reviewer/);
-				assert.ok(!capture.prompt.includes("{{rules}}"));
-				assert.match(capture.prompt, /Read the whole file before commenting/);
-				// pi's own rules survive the swap because {{rules}} is borrowed, not replaced.
+				// pi generates no <rules> of its own once customPrompt is set — the extension re-assembles
+				// it from toolGuidelines + the live loadout, so pi's own rules still show up.
 				assert.match(capture.prompt, /Be concise in your responses/);
 			}
 		} finally {
@@ -141,27 +144,41 @@ describe("persona in a real pi session", () => {
 		}
 	});
 
-	test("pi still owns the sections the persona does not mention", async () => {
-		tempAgentDir({ pirate: "You are a pirate.\n\nRules:\n{{rules}}\n" });
+	test("pi still owns <cwd>; the persona's sections are injected as structured sections", async () => {
+		tempAgentDir({ pirate: "You are a pirate.\n" });
 		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
 		try {
 			await runCommand(session, "persona", "pirate");
 			await session.run(when("hi", [says("arr")]));
 
-			const [first] = captures();
-			assert.match(first.customPrompt ?? "", /You are a pirate/);
-			// pi appends what the template never mentioned: the persona only replaces the preamble.
-			assert.match(first.prompt, /<cwd>/);
-			assert.ok(!first.customPrompt!.includes("<cwd>"), "<cwd> is pi's own, not borrowed");
-			assert.ok(first.prompt.includes(session.cwd), "the <cwd> section carries the session directory");
+			assert.match(captures()[0].customPrompt ?? "", /You are a pirate/);
+			assert.match(captures()[0].prompt, /<cwd>/, "pi appends its own cwd section unconditionally");
+			assert.ok(!captures()[0].customPrompt!.includes("<cwd>"), "<cwd> is pi's own, not borrowed");
+			assert.ok(captures()[0].prompt.includes(session.cwd), "the <cwd> section carries the session directory");
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("the borrowed tool list follows the live loadout of that run", async () => {
+		// The fixture narrows the active tools in an earlier before_agent_start handler; persona renders
+		// its tool list from pi.getActiveTools() at handler time, so it follows the narrowing.
+		// What still lags is `hiddenTools` (pi recomputes it after the handlers) — see docs, limit 4.
+		tempAgentDir({ pirate: PIRATE });
+		const session = await createTestSession({ extensions: [LOADOUT, PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "pirate");
+			await session.run(when("hi", [says("arr")]));
+
+			assert.deepEqual(captures()[0].activeTools, ["read"], "the model is told about read only");
+			assert.match(captures()[0].prompt, /- read:/);
+			assert.ok(!captures()[0].prompt.includes("- bash:"), "a tool the run does not declare is not listed");
 		} finally {
 			session.dispose();
 		}
 	});
 
 	test("a persona file that disappears mid-session falls back to pi's prompt", async () => {
-		// A name only this run's agent dir has, so deleting it really makes it unavailable:
-		// the personas shipped in the package are searched too.
 		const agentDir = tempAgentDir({ vanishing: "You are the vanishing persona." });
 		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
 		try {
@@ -169,22 +186,79 @@ describe("persona in a real pi session", () => {
 			rmSync(join(agentDir, "personas", "vanishing.md"));
 			await session.run(when("hi", [says("hi")]));
 
-			const [first] = captures();
-			assert.equal(first.customPrompt, undefined, "a run must never start half-configured");
-			assert.match(first.prompt, /expert coding assistant/);
-			assert.match(lastNote(session), /'vanishing' not found/);
+			assert.equal(captures()[0].customPrompt, undefined, "a run must never start half-configured");
+			assert.match(captures()[0].prompt, /coding assistant running inside pi/);
+			assert.match(lastNote(session), /persona 'vanishing' failed: persona not found/);
+			assert.deepEqual(statusLine(session), ["persona", "persona: vanishing (ERROR)"]);
 		} finally {
 			session.dispose();
 		}
 	});
 
-	test("a corrupt personas/current means nothing was remembered", async () => {
+	test("on_error: last (default) reuses the same persona's previous render", async () => {
+		const agentDir = tempAgentDir({ pirate: PIRATE });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "pirate");
+			await session.run(when("one", [says("arr")]));
+			// Break the template between runs: the second render throws, the first one is reused.
+			writeFileSync(join(agentDir, "personas", "pirate.md"), "{{ include('missing-part') }}");
+			await session.run(when("two", [says("arr again")]));
+
+			assert.match(captures()[1].prompt, /pirate coding matey/, "the last good render is reused");
+			assert.ok(!captures()[1].prompt.includes("coding assistant running inside pi"), "not silently pi native");
+			assert.match(lastNote(session), /reusing last good prompt/);
+			assert.match(lastNote(session), /include not found: missing-part/, "the error itself is reported");
+			assert.deepEqual(statusLine(session), ["persona", "persona: pirate (ERROR)"]);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("on_error: native falls back to pi's own prompt instead", async () => {
+		const agentDir = tempAgentDir({
+			strict: "---\non_error: native\n---\nYou are the strict captain.\n",
+		});
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "strict");
+			await session.run(when("one", [says("aye")]));
+			assert.match(captures()[0].customPrompt ?? "", /strict captain/);
+
+			writeFileSync(join(agentDir, "personas", "strict.md"), "---\non_error: native\n---\n{{ include('missing') }}");
+			await session.run(when("two", [says("ok")]));
+
+			assert.equal(captures()[1].customPrompt, undefined);
+			assert.match(captures()[1].prompt, /coding assistant running inside pi/);
+			assert.match(lastNote(session), /using pi native prompt/);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("a bad front-matter value is reported, not silently treated as the default", async () => {
+		tempAgentDir({ typo: "---\non_error: abort\n---\nYou are the typo persona.\n" });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "typo");
+			await session.run(when("hi", [says("hi")]));
+			assert.match(lastNote(session), /on_error must be last \| native/);
+			assert.match(lastNote(session), /abort is impossible/, "and says why abort is not offered");
+			assert.equal(captures()[0].customPrompt, undefined);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("corrupt state in personas/current cannot escape the personas directory", async () => {
 		const agentDir = tempAgentDir({ pirate: PIRATE });
 		writeFileSync(stateFile(agentDir), "../../etc/passwd\n");
 		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
 		try {
 			await session.run(when("hi", [says("hi")]));
-			assert.equal(captures()[0].customPrompt, undefined);
+			assert.equal(captures()[0].customPrompt, undefined, "the bad name never becomes a prompt");
+			assert.match(captures()[0].prompt, /coding assistant running inside pi/);
+			assert.match(lastNote(session), /persona not found: \.\.\/\.\.\/etc\/passwd|path traversal in name/);
 		} finally {
 			session.dispose();
 		}
@@ -201,7 +275,7 @@ describe("persona in a real pi session", () => {
 
 			const [, second] = captures();
 			assert.equal(second.customPrompt, undefined);
-			assert.match(second.prompt, /expert coding assistant/);
+			assert.match(second.prompt, /coding assistant running inside pi/);
 			assert.ok(!second.prompt.includes("pirate coding matey"));
 			assert.match(lastNote(session), /persona off/i);
 		} finally {
@@ -216,7 +290,7 @@ describe("persona in a real pi session", () => {
 			await runCommand(session, "persona", "nope");
 			await session.run(when("hi", [says("hi")]));
 
-			assert.match(lastNote(session), /no such persona/i);
+			assert.match(lastNote(session), /No such persona: nope/);
 			assert.match(lastNote(session), /pirate/, "the error lists what is available");
 			assert.equal(captures()[0].customPrompt, undefined);
 		} finally {
@@ -232,7 +306,7 @@ describe("persona in a real pi session", () => {
 			await runCommand(session, "persona", "../..secret");
 			await session.run(when("hi", [says("hi")]));
 
-			assert.match(lastNote(session), /no such persona/i);
+			assert.match(lastNote(session), /persona command failed: path traversal in name/);
 			assert.equal(captures()[0].customPrompt, undefined);
 		} finally {
 			session.dispose();
@@ -251,23 +325,10 @@ describe("persona in a real pi session", () => {
 			const offered = select.args?.[1] as string[];
 			assert.equal(offered[0], "off", "off comes first, then the names in order");
 			assert.deepEqual(offered.slice(1), [...offered.slice(1)].sort());
-			// The two from this run's agent dir plus the one shipped in the package.
+			// Fragments (underscore-prefixed) and hidden files never show up.
 			for (const expected of ["pirate", "reviewer", "default"]) assert.ok(offered.includes(expected), `offered ${expected}`);
+			assert.ok(!offered.includes("_tools"), "fragments are not personas");
 			assert.match(captures()[0].customPrompt ?? "", /senior code reviewer/);
-		} finally {
-			session.dispose();
-		}
-	});
-
-	test("/persona pirate new switches persona before asking pi for a session", async () => {
-		tempAgentDir({ pirate: PIRATE });
-		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
-		try {
-			await runCommand(session, "persona", "pirate new");
-			// The choice is persisted first, so the new session restores it (tier 2's newSession is a no-op).
-			assert.equal(readFileSync(stateFile(process.env.PI_CODING_AGENT_DIR ?? ""), "utf8").trim(), "pirate");
-			await session.run(when("hi", [says("arr")]));
-			assert.match(captures()[0].customPrompt ?? "", /pirate coding matey/);
 		} finally {
 			session.dispose();
 		}
@@ -279,7 +340,6 @@ describe("persona in a real pi session", () => {
 		try {
 			await runCommand(first, "persona", "pirate");
 			assert.equal(readFileSync(stateFile(agentDir), "utf8").trim(), "pirate");
-			// And it is in the session tree, so resume can restore it without the file.
 			const entries = first.session.sessionManager.getEntries() as Array<{ type: string; customType?: string; data?: { name?: string } }>;
 			const remembered = entries.filter((entry) => entry.type === "custom" && entry.customType === "persona");
 			assert.deepEqual(remembered.map((entry) => entry.data?.name), ["pirate"]);
@@ -304,10 +364,30 @@ describe("persona in a real pi session", () => {
 		try {
 			await session.run(when("hi", [says("arr")]));
 			assert.match(captures()[0].customPrompt ?? "", /pirate coding matey/);
-			const status = session.events.uiCallsFor("setStatus").at(-1);
-			assert.deepEqual(status?.args, ["persona", "persona: pirate"]);
+			assert.deepEqual(statusLine(session), ["persona", "persona: pirate"]);
 		} finally {
 			session.dispose();
+			delete process.env.PI_PERSONA;
+		}
+	});
+
+	test("PI_PERSONA beats a persona chosen in an earlier session — the documented quirk", async () => {
+		tempAgentDir({ pirate: PIRATE, reviewer: REVIEWER });
+		const first = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(first, "persona", "reviewer");
+		} finally {
+			first.dispose();
+		}
+		process.env.PI_PERSONA = "pirate";
+		const second = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await second.run(when("hi", [says("arr")]));
+			assert.match(captures()[0].customPrompt ?? "", /pirate coding matey/, "env wins over the remembered choice");
+			await runCommand(second, "persona", "status");
+			assert.match(lastNote(second), /from PI_PERSONA env/);
+		} finally {
+			second.dispose();
 			delete process.env.PI_PERSONA;
 		}
 	});
@@ -329,42 +409,55 @@ describe("persona in a real pi session", () => {
 		}
 	});
 
-	test("with a custom pi prompt there is nothing to borrow: the placeholder is dropped, not literal", async () => {
-		// SYSTEM.md / --system-prompt make pi skip <tools>/<rules>/<docs> entirely, so a template that
-		// asks for them must degrade to the persona text alone.
+	test("with a custom pi prompt, tools and rules are still re-assembled and docs disappears", async () => {
+		// SYSTEM.md / --system-prompt make pi skip <tools>/<rules>/<docs>. The tool list and rules are
+		// rebuilt from structured facts, so they survive; docs is extraction-first and stays empty —
+		// inventing pi's docs text there would create a section pi itself never had.
 		tempAgentDir({ pirate: PIRATE });
-		const session = await createTestSession({ extensions: [PERSONA, CAPTURE], systemPrompt: "You are pi configured through --system-prompt." });
+		const session = await createTestSession({
+			extensions: [PERSONA, CAPTURE],
+			systemPrompt: "You are pi configured through --system-prompt.",
+		});
 		try {
 			await runCommand(session, "persona", "pirate");
-			await session.run(when("one", [says("arr")]), when("two", [says("arr again")]));
+			await session.run(when("one", [says("arr")]));
 
-			assert.equal(captures().length, 2);
-			for (const capture of captures()) {
-				assert.match(capture.customPrompt ?? "", /pirate coding matey/);
-				assert.ok(!capture.prompt.includes("{{"), "placeholder syntax must never reach the model");
-				assert.ok(!capture.prompt.includes("<tools>"), "an empty <tools></tools> would claim there are no tools");
-				assert.match(capture.prompt, /<cwd>/, "pi still appends its own sections after the preamble");
-			}
-			const warnings = notes(session).filter((note) => note.includes("nothing to borrow"));
-			assert.equal(warnings.length, 1, "one warning per placeholder per process, not per run");
-			assert.match(warnings[0], /\{\{tools\}\}/);
+			const [first] = captures();
+			assert.match(first.customPrompt ?? first.prompt, /pirate coding matey/);
+			assert.ok(!first.prompt.includes("--system-prompt"), "the persona replaces the custom prompt, it does not stack on it");
+			assert.ok(!first.prompt.includes("{{"), "no placeholder syntax may reach the model");
+			assert.match(first.prompt, /- read:/, "the tool list comes from structured facts, not from pi's text");
+			assert.ok(!first.prompt.includes("<docs>"), "an empty <docs> would claim pi documented something it did not");
+			assert.match(first.prompt, /<cwd>/, "pi still appends its own sections after the preamble");
 		} finally {
 			session.dispose();
 		}
 	});
 
-	test("a borrowed <tools> body is handler-time state, not the finalized loadout", async () => {
-		// The fixture narrows the loadout in an earlier handler; pi applies that after the chain runs,
-		// so a section borrowed during the handler can name a tool the request does not declare.
+	test("/persona prompt refuses to export before anything has run", async () => {
 		tempAgentDir({ pirate: PIRATE });
-		const session = await createTestSession({ extensions: [LOADOUT, PERSONA, CAPTURE] });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
 		try {
-			await runCommand(session, "persona", "pirate");
-			await session.run(when("hi", [says("arr")]));
+			// ctx.getSystemPrompt() falls back to pi's own prompt when no run happened yet; exporting that
+			// as "the effective prompt" would be a lie.
+			await runCommand(session, "persona", "prompt");
+			assert.match(lastNote(session), /还没有跑过任何 run/);
+		} finally {
+			session.dispose();
+		}
+	});
 
-			const [first] = captures();
-			assert.deepEqual(first.activeTools, ["read"], "the model is told about read only");
-			assert.match(first.customPrompt ?? "", /- bash:/, "the borrowed body still lists bash");
+	test("/persona pirate new persists first, then asks pi for a session", async () => {
+		tempAgentDir({ pirate: PIRATE });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "pirate new");
+			// The choice is persisted before newSession, so the fresh session restores it; and `new` is a
+			// flag, not a persona name.
+			assert.equal(readFileSync(stateFile(process.env.PI_CODING_AGENT_DIR ?? ""), "utf8").trim(), "pirate");
+			assert.ok(!lastNote(session).includes("No such persona: new"), "`new` must not be read as a name");
+			await session.run(when("hi", [says("arr")]));
+			assert.match(captures()[0].customPrompt ?? "", /pirate coding matey/);
 		} finally {
 			session.dispose();
 		}
@@ -380,6 +473,7 @@ describe("persona in a real pi session", () => {
 			assert.deepEqual(completions.map((item) => item.value), ["reviewer"]);
 			const everything = await runner.getCommand("persona")?.getArgumentCompletions?.("");
 			assert.ok(everything?.some((item) => item.value === "off"), "off must be completable");
+			assert.ok(everything?.some((item) => item.value === "golden"), "golden must be completable");
 		} finally {
 			session.dispose();
 		}
