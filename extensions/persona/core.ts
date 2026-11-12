@@ -342,6 +342,62 @@ export function renderProjectContext(files: PromptFacts["contextFiles"]): string
 	].join("\n\n");
 }
 
+/* ---------------- 请求视图（诊断用，不是 prompt 本身） ---------------- */
+
+/** 一次 run 里真的声明给模型的工具：名字 + 描述 + 参数 schema。 */
+export type DeclaredTool = {
+	name: string;
+	description: string;
+	parameters?: unknown;
+};
+
+/** JSON Schema 对象的一行摘要：`path*: string, tags: string[]`。抽不出来的时候必须说破。 */
+export function summarizeParameters(schema: unknown): string {
+	if (schema === undefined || schema === null) return "(no parameters)";
+	if (typeof schema !== "object" || Array.isArray(schema)) return "(not an object schema)";
+	const s = schema as { type?: string; properties?: Record<string, unknown>; required?: string[] };
+	if (s.type !== undefined && s.type !== "object") return "(not an object schema)";
+	if (!s.properties || !Object.keys(s.properties).length) return "(no parameters)";
+	const required = new Set(s.required ?? []);
+	return Object.entries(s.properties)
+		.map(([name, prop]) => {
+			const p = (typeof prop === "object" && prop !== null ? prop : {}) as
+				{ type?: string; enum?: unknown[]; items?: { type?: string } };
+			let type = p.type ?? "any";
+			if (p.enum?.length) type = p.enum.map((v) => JSON.stringify(v)).join(" | ");
+			else if (type === "array") type = `${p.items?.type ?? "any"}[]`;
+			return `${name}${required.has(name) ? "*" : ""}: ${type}`;
+		})
+		.join(", ");
+}
+
+/**
+ * 把 system 角色的全貌拼成可读块：文本 + 工具声明。
+ *
+ * bare 模式下 pi 不发 `<tools>` 段，但工具声明仍然跟着请求走（transcript 里是
+ * `{role:"system", content, toolsAdded:[…]}`）；只导出正文会漏掉模型被告知的一半。
+ * `system role content` 块是**逐字**的（只多一个分隔空行），banner 形如 `===== label =====`。
+ */
+export function renderRequestView(input: {
+	systemText: string;
+	mode: Mode;
+	declared: DeclaredTool[];
+	undeclared: string[];
+}): string {
+	const declaredBlock = input.declared.length
+		? input.declared
+			.map((t) => `- ${t.name}\n    description: ${t.description.split("\n").join("\n    ")}`
+				+ `\n    parameters: ${summarizeParameters(t.parameters)}`)
+			.join("\n")
+		: "(none)";
+	const undeclaredBlock = input.undeclared.length ? input.undeclared.map((n) => `- ${n}`).join("\n") : "(none)";
+	return [
+		[`system role content (mode: ${input.mode})`, input.systemText],
+		["tools declared to the model", declaredBlock],
+		["registered but not declared", undeclaredBlock],
+	].map(([label, body]) => `===== ${label} =====\n${body}\n\n`).join("");
+}
+
 /* ---------------- 段抽取（保守：行锚定 + 唯一性） ---------------- */
 
 export function extractSection(text: string | undefined, tag: string): string | undefined {

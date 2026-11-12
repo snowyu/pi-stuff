@@ -89,6 +89,6 @@ npm run typecheck    # tsc --noEmit against pi's own types
   `..` `/` `\` `:` and the reserved words `off dirs prompt status golden` are rejected. Details:
   [docs/persona.md](docs/persona.md).
 - Runtime state (for example `~/.pi/agent/proxy-guard.json`, `~/.pi/agent/personas/current`,
-  `~/.pi/agent/personas/.rendered.txt`) lives outside this repo.
+  `~/.pi/agent/personas/.rendered.txt`, `~/.pi/agent/personas/.effective.txt`) lives outside this repo.
 - Do not keep a loose copy of an extension in `~/.pi/agent/extensions/` while also loading it through
   this package: it would load twice.

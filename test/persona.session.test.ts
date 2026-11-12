@@ -68,6 +68,11 @@ function renderedFile(agentDir: string): string {
 	return join(agentDir, "personas", ".rendered.txt");
 }
 
+/** Where `/persona prompt` writes the full system-role view (text + tool declarations). */
+function effectiveFile(agentDir: string): string {
+	return join(agentDir, "personas", ".effective.txt");
+}
+
 /** Run the registered slash command the way pi's TUI would. */
 async function runCommand(session: TestSession, command: string, args: string): Promise<void> {
 	const runner = session.session.extensionRunner as ExtensionRunner;
@@ -468,7 +473,7 @@ describe("persona in a real pi session", () => {
 			assert.match(exported, /You are a pirate coding matey/);
 			assert.ok(!exported.includes("coding assistant running inside pi"), "the persona prompt must be the export");
 			assert.match(exported, /<cwd>/, "the export is pi's full render, not just the preamble we set");
-			assert.match(lastNote(session), /Effective prompt from the last run written/);
+			assert.ok(notes(session).some((n) => /Effective prompt from the last run written/.test(n)));
 		} finally {
 			session.dispose();
 		}
@@ -522,7 +527,7 @@ describe("persona in a real pi session", () => {
 			const exported = readFileSync(renderedFile(agentDir), "utf8");
 			assert.match(exported, /pirate coding matey/, "the export is what the last run used");
 			assert.ok(!exported.includes("senior code reviewer"), "nothing unrendered may be presented as effective");
-			assert.match(lastNote(session), /last run/);
+			assert.ok(notes(session).some((n) => /last run/.test(n)), "the notify names the run the export came from");
 		} finally {
 			session.dispose();
 		}
@@ -547,6 +552,38 @@ describe("persona in a real pi session", () => {
 				notes(session).some((n) => /回退|fallback/i.test(n)),
 				"exporting a fallback prompt has to be flagged",
 			);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("/persona prompt also exports the tool declarations the request carries", async () => {
+		// bare mode sends no `<tools>` section, but front-matter `tools:` still reaches the model as tool
+		// declarations on the system message (`{role:"system", content, toolsAdded:[…]}`), so the text
+		// alone is not the whole system role.
+		const lean = "---\nmode: bare\ntools: [read]\n---\nYou are a lean pirate.\n";
+		const agentDir = tempAgentDir({ lean });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "lean");
+			await session.run(when("hi", [says("arr")]));
+			await runCommand(session, "persona", "prompt");
+
+			const view = readFileSync(effectiveFile(agentDir), "utf8");
+			assert.match(view, /^===== system role content \(mode: bare\) =====$/m);
+			assert.match(view, /^===== tools declared to the model =====$/m);
+			assert.match(view, /^===== registered but not declared =====$/m);
+
+			const at = (label: string) => view.indexOf(`===== ${label} =====`);
+			const declared = view.slice(at("tools declared to the model"), at("registered but not declared"));
+			assert.match(declared, /^- read$/m, "the declared tool is listed with its schema");
+			assert.match(declared, /parameters: path\*: string/, "the model sees the parameter schema, so it gets reported");
+			assert.ok(!/^- bash$/m.test(declared), "front-matter tools: decides what is declared");
+			assert.match(view.slice(at("registered but not declared")), /^- bash$/m, "and what got cut is visible too");
+
+			// The byte-exact artifact must stay byte-exact: no banners in it.
+			assert.equal(readFileSync(renderedFile(agentDir), "utf8").trimEnd(), "You are a lean pirate.");
+			assert.ok(notes(session).some((n) => /Request view written/.test(n)), "the notify names both files");
 		} finally {
 			session.dispose();
 		}

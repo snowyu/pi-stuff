@@ -29,7 +29,21 @@ import {
 	isReserved,
 	personaTools,
 	type PromptFacts,
+	renderRequestView,
+	summarizeParameters,
 } from "../extensions/persona/core.ts";
+
+/** Split a rendered request view into its labeled blocks (banner: `===== label =====`). */
+function viewBlocks(text: string): Map<string, string> {
+	const marks = [...text.matchAll(/^===== (.+) =====\n/gm)];
+	const out = new Map<string, string>();
+	marks.forEach((m, i) => {
+		const from = m.index + m[0].length;
+		const to = marks[i + 1]?.index ?? text.length;
+		out.set(m[1]!, text.slice(from, to).replace(/\n\n$/, ""));
+	});
+	return out;
+}
 
 const F: PromptFacts = {
 	cwd: "/proj",
@@ -384,5 +398,63 @@ describe("shipped personas (personas/*.md)", () => {
 
 	test("the persona set does not collide with the subcommand words", () => {
 		for (const name of names) assert.equal(isReserved(name), false, `${name} is a reserved subcommand word`);
+	});
+});
+
+describe("the request view: the whole system role, not only its text", () => {
+	test("summarizeParameters names each property, marks required, keeps enums", () => {
+		assert.equal(
+			summarizeParameters({
+				type: "object",
+				properties: { path: { type: "string" }, offset: { type: "number" } },
+				required: ["path"],
+			}),
+			"path*: string, offset: number",
+		);
+		assert.equal(
+			summarizeParameters({ type: "object", properties: { mode: { type: "string", enum: ["a", "b"] } } }),
+			'mode: "a" | "b"',
+		);
+		assert.equal(
+			summarizeParameters({ type: "object", properties: { tags: { type: "array", items: { type: "string" } } } }),
+			"tags: string[]",
+		);
+	});
+
+	test("summarizeParameters says so when there is nothing to summarize", () => {
+		assert.equal(summarizeParameters(undefined), "(no parameters)");
+		assert.equal(summarizeParameters({ type: "object" }), "(no parameters)");
+		assert.equal(summarizeParameters({ type: "string" }), "(not an object schema)");
+	});
+
+	test("the view keeps the system text verbatim and puts declarations in their own blocks", () => {
+		const text = renderRequestView({
+			systemText: "You are a pirate.\nTricky  whitespace.  ",
+			mode: "bare",
+			declared: [{
+				name: "read",
+				description: "Read files.",
+				parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+			}],
+			undeclared: ["bash", "edit"],
+		});
+		const blocks = viewBlocks(text);
+		assert.deepEqual([...blocks.keys()], [
+			"system role content (mode: bare)",
+			"tools declared to the model",
+			"registered but not declared",
+		]);
+		assert.equal(blocks.get("system role content (mode: bare)"), "You are a pirate.\nTricky  whitespace.  ");
+		assert.match(
+			blocks.get("tools declared to the model")!,
+			/^- read\n {4}description: Read files\.\n {4}parameters: path\*: string$/,
+		);
+		assert.equal(blocks.get("registered but not declared"), "- bash\n- edit");
+	});
+
+	test("an empty tool set is written out explicitly, not as an empty block", () => {
+		const blocks = viewBlocks(renderRequestView({ systemText: "x", mode: "sections", declared: [], undeclared: [] }));
+		assert.equal(blocks.get("tools declared to the model"), "(none)");
+		assert.equal(blocks.get("registered but not declared"), "(none)");
 	});
 });
