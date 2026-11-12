@@ -63,14 +63,14 @@ function stateFile(agentDir: string): string {
 	return join(agentDir, "personas", "current");
 }
 
-/** Where `/persona prompt` writes the exported prompt. */
-function renderedFile(agentDir: string): string {
-	return join(agentDir, "personas", ".rendered.txt");
+/** Where `/persona prompt` writes the verbatim system text. */
+function promptFile(agentDir: string): string {
+	return join(agentDir, "personas", "system-prompt.txt");
 }
 
-/** Where `/persona prompt` writes the full system-role view (text + tool declarations). */
-function effectiveFile(agentDir: string): string {
-	return join(agentDir, "personas", ".effective.txt");
+/** Where `/persona prompt` writes what was really sent to the model. */
+function sentFile(agentDir: string): string {
+	return join(agentDir, "personas", "sent-to-model.txt");
 }
 
 /** Run the registered slash command the way pi's TUI would. */
@@ -469,7 +469,7 @@ describe("persona in a real pi session", () => {
 			await session.run(when("hi", [says("ahoy")]));
 			await runCommand(session, "persona", "prompt");
 
-			const exported = readFileSync(renderedFile(agentDir), "utf8");
+			const exported = readFileSync(promptFile(agentDir), "utf8");
 			assert.match(exported, /You are a pirate coding matey/);
 			assert.ok(!exported.includes("coding assistant running inside pi"), "the persona prompt must be the export");
 			assert.match(exported, /<cwd>/, "the export is pi's full render, not just the preamble we set");
@@ -485,7 +485,7 @@ describe("persona in a real pi session", () => {
 		try {
 			await session.run(when("hi", [says("ahoy")]));
 			await runCommand(session, "persona", "prompt");
-			assert.match(readFileSync(renderedFile(agentDir), "utf8"), /coding assistant running inside pi/);
+			assert.match(readFileSync(promptFile(agentDir), "utf8"), /coding assistant running inside pi/);
 		} finally {
 			session.dispose();
 		}
@@ -498,8 +498,8 @@ describe("persona in a real pi session", () => {
 			await runCommand(session, "persona", "pirate");
 			await session.run(when("hi", [says("ahoy")]));
 			await runCommand(session, "persona", "prompt");
-			assert.match(readFileSync(renderedFile(agentDir), "utf8"), /pirate/);
-			rmSync(renderedFile(agentDir));
+			assert.match(readFileSync(promptFile(agentDir), "utf8"), /pirate/);
+			rmSync(promptFile(agentDir));
 
 			// What `/new` does to the extension: a fresh session_start with no run behind it yet.
 			const runner = session.session.extensionRunner as ExtensionRunner;
@@ -507,7 +507,7 @@ describe("persona in a real pi session", () => {
 			await runCommand(session, "persona", "prompt");
 
 			assert.match(lastNote(session), /还没有跑过任何 run/);
-			assert.ok(!existsSync(renderedFile(agentDir)), "a snapshot from the old session must not be exported");
+			assert.ok(!existsSync(promptFile(agentDir)), "a snapshot from the old session must not be exported");
 		} finally {
 			session.dispose();
 		}
@@ -524,7 +524,7 @@ describe("persona in a real pi session", () => {
 			await runCommand(session, "persona", "reviewer");
 			await runCommand(session, "persona", "prompt");
 
-			const exported = readFileSync(renderedFile(agentDir), "utf8");
+			const exported = readFileSync(promptFile(agentDir), "utf8");
 			assert.match(exported, /pirate coding matey/, "the export is what the last run used");
 			assert.ok(!exported.includes("senior code reviewer"), "nothing unrendered may be presented as effective");
 			assert.ok(notes(session).some((n) => /last run/.test(n)), "the notify names the run the export came from");
@@ -545,7 +545,7 @@ describe("persona in a real pi session", () => {
 			await session.run(when("two", [says("ok")]));
 			await runCommand(session, "persona", "prompt");
 
-			const exported = readFileSync(renderedFile(agentDir), "utf8");
+			const exported = readFileSync(promptFile(agentDir), "utf8");
 			assert.ok(!exported.includes("strict captain"), "the last run used pi's own prompt");
 			assert.match(exported, /coding assistant running inside pi/);
 			assert.ok(
@@ -569,7 +569,7 @@ describe("persona in a real pi session", () => {
 			await session.run(when("hi", [says("arr")]));
 			await runCommand(session, "persona", "prompt");
 
-			const view = readFileSync(effectiveFile(agentDir), "utf8");
+			const view = readFileSync(sentFile(agentDir), "utf8");
 			assert.match(view, /^===== system role content \(mode: bare\) =====$/m);
 			assert.match(view, /^===== tools declared to the model =====$/m);
 			assert.match(view, /^===== registered but not declared =====$/m);
@@ -582,8 +582,8 @@ describe("persona in a real pi session", () => {
 			assert.match(view.slice(at("registered but not declared")), /^- bash$/m, "and what got cut is visible too");
 
 			// The byte-exact artifact must stay byte-exact: no banners in it.
-			assert.equal(readFileSync(renderedFile(agentDir), "utf8").trimEnd(), "You are a lean pirate.");
-			assert.ok(notes(session).some((n) => /Request view written/.test(n)), "the notify names both files");
+			assert.equal(readFileSync(promptFile(agentDir), "utf8").trimEnd(), "You are a lean pirate.");
+			assert.ok(notes(session).some((n) => /Sent to model written/.test(n)), "the notify names both files");
 		} finally {
 			session.dispose();
 		}
@@ -621,3 +621,43 @@ describe("persona in a real pi session", () => {
 		}
 	});
 });
+
+	test("sent-to-model.txt says so when no provider request happened", async () => {
+		const agentDir = tempAgentDir({ pirate: PIRATE });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "pirate");
+			await session.run(when("hi", [says("ahoy")]));
+			await runCommand(session, "persona", "prompt");
+			assert.match(readFileSync(sentFile(agentDir), "utf8"), /no provider request seen in this session/);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("sent-to-model.txt carries the system text the provider was actually given", async () => {
+		const agentDir = tempAgentDir({ pirate: PIRATE });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "pirate");
+			await session.run(when("hi", [says("ahoy")]));
+			// The scripted harness provider builds no payload, so drive the hook the way the provider
+			// layer does: Anthropic sends `system` as blocks and injects an identity block that pi's own
+			// rendering never contains — the payload view is the only place it shows up.
+			const runner = session.session.extensionRunner as ExtensionRunner;
+			await runner.emitBeforeProviderRequest({
+				system: [
+					{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+					{ type: "text", text: "You are a pirate coding matey." },
+				],
+			});
+			await runCommand(session, "persona", "prompt");
+
+			const view = readFileSync(sentFile(agentDir), "utf8");
+			assert.match(view, /^===== system text the provider was given/m);
+			assert.match(view, /You are Claude Code, Anthropic's official CLI for Claude\./, "an injected identity block only shows in the payload view");
+			assert.match(view, /captured outside an agent run/, "a payload seen while idle must not pass itself off as the run's");
+		} finally {
+			session.dispose();
+		}
+	});

@@ -29,6 +29,7 @@ import {
 	isReserved,
 	personaTools,
 	type PromptFacts,
+	extractProviderSystem,
 	renderRequestView,
 	summarizeParameters,
 } from "../extensions/persona/core.ts";
@@ -467,5 +468,66 @@ describe("the request view: the whole system role, not only its text", () => {
 		const blocks = viewBlocks(renderRequestView({ systemText: "x", mode: "sections", declared: [], undeclared: [] }));
 		assert.equal(blocks.get("tools declared to the model"), "(none)");
 		assert.equal(blocks.get("registered but not declared"), "(none)");
+	});
+});
+
+describe("the provider payload: the system text the model was handed", () => {
+	test("Anthropic sends the system prompt as blocks, identity injection included", () => {
+		const got = extractProviderSystem({
+			system: [
+				{ type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
+				{ type: "text", text: "You are a pirate." },
+			],
+		});
+		assert.equal(got.text, "You are Claude Code, Anthropic's official CLI for Claude.\n\nYou are a pirate.");
+		assert.equal(got.source, "system blocks");
+	});
+
+	test("OpenAI chat keeps it as a message, under system or developer", () => {
+		assert.equal(
+			extractProviderSystem({ messages: [{ role: "developer", content: "You are a pirate." }, { role: "user", content: "hi" }] }).text,
+			"You are a pirate.",
+		);
+		assert.equal(
+			extractProviderSystem({ messages: [{ role: "system", content: [{ type: "text", text: "head" }, { type: "text", text: "patch" }] }] }).text,
+			"head\n\npatch",
+		);
+	});
+
+	test("Responses and Codex use instructions, Google uses systemInstruction", () => {
+		assert.equal(extractProviderSystem({ instructions: "You are a pirate." }).text, "You are a pirate.");
+		assert.equal(extractProviderSystem({ systemInstruction: "You are a pirate." }).text, "You are a pirate.");
+		assert.equal(extractProviderSystem({ systemInstruction: { parts: [{ text: "a" }, { text: "b" }] } }).text, "a\n\nb");
+	});
+
+	test("an unrecognized shape is reported, never guessed at", () => {
+		const got = extractProviderSystem({ prompt: "x", foo: 1 });
+		assert.equal(got.text, "");
+		assert.match(got.note ?? "", /unrecognized payload shape \(keys: prompt, foo\)/);
+	});
+
+	test("the sent-to-model view adds that block without touching the other three", () => {
+		const blocks = viewBlocks(renderRequestView({
+			systemText: "You are a pirate.",
+			mode: "bare",
+			declared: [{ name: "read", description: "Read files.", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } }],
+			undeclared: [],
+			provider: { text: "You are Claude Code.\n\nYou are a pirate.", source: "system blocks", model: "claude-opus-5" },
+		}));
+		assert.deepEqual([...blocks.keys()], [
+			"system role content (mode: bare)",
+			"tools declared to the model",
+			"registered but not declared",
+			"system text the provider was given (claude-opus-5, from system blocks)",
+		]);
+		assert.equal(blocks.get("system text the provider was given (claude-opus-5, from system blocks)"), "You are Claude Code.\n\nYou are a pirate.");
+	});
+
+	test("when the shape was not recognized the view says so in place of the text", () => {
+		const blocks = viewBlocks(renderRequestView({
+			systemText: "x", mode: "sections", declared: [], undeclared: [],
+			provider: { text: "", note: "unrecognized payload shape (keys: foo)" },
+		}));
+		assert.match(blocks.get("system text the provider was given")!, /unrecognized payload shape/);
 	});
 });

@@ -371,8 +371,66 @@ export function summarizeParameters(schema: unknown): string {
 		.join(", ");
 }
 
+/** 从 provider payload 里抽出的 system 文本：抽到哪一段、抽不到为什么。 */
+export type ProviderSystem = {
+	text: string;
+	source?: string;
+	note?: string;
+	model?: string;
+	/** 这份捕获不在 agent run 里（compaction / 摘要走同一个 hook）——写出来不冒充。 */
+	caveat?: string;
+};
+
+/** Text of a string / block array / `{parts}` / `{content}` shape, blocks joined by a blank line. */
+function textOf(value: unknown): string | undefined {
+	if (typeof value === "string") return value;
+	if (Array.isArray(value)) {
+		const parts = value.map(textOf).filter((t): t is string => t !== undefined && t.length > 0);
+		return parts.join("\n\n");
+	}
+	if (value && typeof value === "object") {
+		const o = value as { text?: unknown; content?: unknown; parts?: unknown };
+		if (typeof o.text === "string") return o.text;
+		if (o.parts !== undefined) return textOf(o.parts);
+		if (o.content !== undefined) return textOf(o.content);
+	}
+	return undefined;
+}
+
 /**
- * 把 system 角色的全貌拼成可读块：文本 + 工具声明。
+ * 从 `before_provider_request` 的 payload 里取“模型真的被告知的 system 文本”。
+ *
+ * 这一段是 provider 侧的，不是 pi 会话侧的：Anthropic 把 system 发成 `system: [{type:"text"}]`（OAuth 下
+ * 前面还会硬插一条 Claude Code 身份段），OpenAI chat 发成一条 system/developer 角本消息，
+ * Responses/Codex 用 `instructions`，Google 用 `systemInstruction`。抽不到就报告抽不到，不猜。
+ */
+export function extractProviderSystem(payload: unknown): Omit<ProviderSystem, "model"> {
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+		return { text: "", note: "unrecognized payload shape (not an object)" };
+	}
+	const p = payload as Record<string, unknown>;
+	if (p.system !== undefined) {
+		const text = textOf(p.system);
+		if (text) return { text, source: Array.isArray(p.system) ? "system blocks" : "system" };
+	}
+	if (typeof p.instructions === "string" && p.instructions.length) return { text: p.instructions, source: "instructions" };
+	if (p.systemInstruction !== undefined) {
+		const text = textOf(p.systemInstruction);
+		if (text) return { text, source: "systemInstruction" };
+	}
+	if (Array.isArray(p.messages)) {
+		const roles = new Set(["system", "developer", "instruction"]);
+		const parts = (p.messages as unknown[])
+			.filter((m) => m && typeof m === "object" && roles.has(String((m as { role?: unknown }).role)))
+			.map((m) => textOf((m as { content?: unknown }).content))
+			.filter((t): t is string => t !== undefined && t.length > 0);
+		if (parts.length) return { text: parts.join("\n\n"), source: "system-role messages" };
+	}
+	return { text: "", note: `unrecognized payload shape (keys: ${Object.keys(p).join(", ")})` };
+}
+
+/**
+ * 把 system 角色的全貌拼成可读块：文本 + 工具声明（可选再加 provider 侧的原文）。
  *
  * bare 模式下 pi 不发 `<tools>` 段，但工具声明仍然跟着请求走（transcript 里是
  * `{role:"system", content, toolsAdded:[…]}`）；只导出正文会漏掉模型被告知的一半。
@@ -383,6 +441,7 @@ export function renderRequestView(input: {
 	mode: Mode;
 	declared: DeclaredTool[];
 	undeclared: string[];
+	provider?: ProviderSystem;
 }): string {
 	const declaredBlock = input.declared.length
 		? input.declared
@@ -391,11 +450,21 @@ export function renderRequestView(input: {
 			.join("\n")
 		: "(none)";
 	const undeclaredBlock = input.undeclared.length ? input.undeclared.map((n) => `- ${n}`).join("\n") : "(none)";
-	return [
+	const blocks: Array<[string, string]> = [
 		[`system role content (mode: ${input.mode})`, input.systemText],
 		["tools declared to the model", declaredBlock],
 		["registered but not declared", undeclaredBlock],
-	].map(([label, body]) => `===== ${label} =====\n${body}\n\n`).join("");
+	];
+	if (input.provider) {
+		const where = [input.provider.model, input.provider.source ? `from ${input.provider.source}` : undefined]
+			.filter((s): s is string => !!s).join(", ");
+		blocks.push([
+			`system text the provider was given${where ? ` (${where})` : ""}`,
+			(input.provider.text || input.provider.note || "(none)")
+				+ (input.provider.caveat ? `\n\n(${input.provider.caveat})` : ""),
+		]);
+	}
+	return blocks.map(([label, body]) => `===== ${label} =====\n${body}\n\n`).join("");
 }
 
 /* ---------------- 段抽取（保守：行锚定 + 唯一性） ---------------- */

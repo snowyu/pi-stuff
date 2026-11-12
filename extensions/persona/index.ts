@@ -20,10 +20,12 @@ import {
 	type DeclaredTool,
 	type Mode,
 	type PersonaDecision,
+	type ProviderSystem,
 	type PersonaMeta,
 	type PromptFacts,
 	assertSafeName,
 	decidePersona,
+	extractProviderSystem,
 	extractSection,
 	isOff,
 	isReserved,
@@ -166,6 +168,11 @@ export default function persona(pi: ExtensionAPI) {
 	} | undefined;
 	/** 上一次 run 实际生效的人设模式（回退时是回退后的那份）。 */
 	let lastRunMode: Mode = "sections";
+	/** provider 侧的 system 原文（`before_provider_request` 的 payload 里抽的）。 */
+	let lastProvider: ProviderSystem | undefined;
+	/** 该捕获是否来自 agent run；pi 的 compaction / 摘要请求走同一个 hook。 */
+	let providerFromRun = false;
+	let inAgentRun = false;
 	let lastCapture: { facts: PromptFacts; piPromptText: string } | undefined;
 
 	const status = (ctx: ExtensionContext) => {
@@ -215,6 +222,9 @@ export default function persona(pi: ExtensionAPI) {
 			// 快照是会话级的：不清就会把上一个会话的 prompt 当成本会话的导出。
 			lastRun = undefined;
 			lastRunMode = "sections";
+			lastProvider = undefined;
+			providerFromRun = false;
+			inAgentRun = false;
 			lastCapture = undefined;
 		} catch (e) {
 			current = undefined;
@@ -292,6 +302,24 @@ export default function persona(pi: ExtensionAPI) {
 	pi.on("turn_end", snapshotPrompt);
 	pi.on("agent_end", snapshotPrompt);
 
+	/* provider 侧的那一份：payload 就是即将 POST 的对象，system 的存放位置每家不同
+	 * （Anthropic 是 `system` 块数组、OAuth 下还会硬插身份段；OpenAI chat 是一条 system/developer
+	 * 角本消息；Responses/Codex 用 `instructions`；Google 用 `systemInstruction`），抽法在 core。 */
+	pi.on("turn_start", () => {
+		inAgentRun = true;
+	});
+	pi.on("agent_end", () => {
+		inAgentRun = false;
+	});
+	pi.on("before_provider_request", (event, ctx) => {
+		const got = extractProviderSystem(event.payload);
+		if (!got.text && !got.note) return;
+		// run 内的捕获优先：idle 时看到的（compaction / 摘要 / 下一次请求）不能顶掉它。
+		if (providerFromRun && !inAgentRun) return;
+		lastProvider = { ...got, model: ctx.model?.id };
+		providerFromRun = inAgentRun;
+	});
+
 	pi.registerCommand("persona", {
 		description: "Switch persona: /persona [name] [new] · off · dirs · prompt · status · golden",
 		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
@@ -332,19 +360,26 @@ export default function persona(pi: ExtensionAPI) {
 					const dir = join(getAgentDir(), "personas");
 					mkdirSync(dir, { recursive: true });
 					// 逐字的 system 角本文本（可以直接 diff / 录 golden）。
-					const out = join(dir, ".rendered.txt");
+					const out = join(dir, "system-prompt.txt");
 					writeFileSync(out, lastRun.systemText, "utf8");
 					// 切了人设但没跑：快照还是上一个 run 的 prompt。notify 里说清它来自哪。
 					ctx.ui.notify(`Effective prompt from the last run written: ${out}`, "info");
-					// 同一个 run 的完整视图：文本 + 工具声明（bare 模式下 `<tools>` 不在文本里，但声明仍然上线）。
-					const view = join(dir, ".effective.txt");
-					writeFileSync(view, renderRequestView({
+					// 模型真的被告知了什么：同一 run 的文本 + 工具声明 + provider 侧的 system 原文。
+					const sent = join(dir, "sent-to-model.txt");
+					writeFileSync(sent, renderRequestView({
 						systemText: lastRun.systemText,
 						mode: lastRun.mode,
 						declared: lastRun.declared,
 						undeclared: lastRun.undeclared,
+						provider: {
+							...(lastProvider ?? { text: "", note: "no provider request seen in this session (a scripted or offline provider builds no payload)" }),
+							model: lastProvider?.model,
+							caveat: lastProvider && !providerFromRun
+								? "captured outside an agent run — pi's compaction and summary requests hit the same hook"
+								: undefined,
+						},
 					}), "utf8");
-					ctx.ui.notify(`Request view written (system text + tool declarations): ${view}`, "info");
+					ctx.ui.notify(`Sent to model written (system text + tool declarations + provider text): ${sent}`, "info");
 					if (lastError) {
 						ctx.ui.notify(
 							`persona: 上次 run 渲染失败（${lastError.persona}: ${lastError.message}），导出的是回退后的 prompt`,
