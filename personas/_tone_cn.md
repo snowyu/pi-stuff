@@ -1,0 +1,1 @@
+Always answer in Chinese unless the user writes in another language.
