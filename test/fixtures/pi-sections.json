@@ -1,0 +1,60 @@
+{
+  "piVersion": "1.5.2",
+  "capturedAt": "2026-11-12T03:55:02.523Z",
+  "facts": {
+    "toolNames": [
+      "read",
+      "bash",
+      "edit",
+      "write",
+      "web_search",
+      "source_check",
+      "fetch_content",
+      "get_search_content"
+    ],
+    "hiddenTools": [],
+    "toolSnippets": {
+      "read": "Read file contents",
+      "bash": "Execute bash commands (ls, grep, find, etc.)",
+      "powershell": "Execute PowerShell commands",
+      "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
+      "write": "Create or overwrite files",
+      "grep": "Search file contents for patterns (respects .gitignore)",
+      "find": "Find files by glob pattern (respects .gitignore)",
+      "ls": "List directory contents",
+      "web_search": "Web research. Prefer {queries:[...]} with 2-4 varied angles; omit provider unless overriding the default.",
+      "source_check": "Gather source evidence with passage citations for a claim.",
+      "fetch_content": "Use to fetch URL content, direct images, GitHub repos, and videos.",
+      "get_search_content": "Use after web_search, source_check, or fetch_content to read stored content; findText finds passages without paging.",
+      "web_enable": "If tools for web search, source checking, content fetching, stored-result retrieval are not already available, call web_enable first whenever current, external, or linked information could help; the tools appear on the next model request.",
+      "codemode": "Run JavaScript that calls other tools",
+      "tool_search": "Search for tools that are not loaded yet and load the matches"
+    },
+    "toolGuidelines": {
+      "read": [
+        "Use read to examine files instead of cat or sed."
+      ],
+      "bash": [
+        "You can inspect PI_* environment variables for current model and session details."
+      ],
+      "powershell": [
+        "You can inspect PI_* environment variables for current model and session details."
+      ],
+      "edit": [
+        "Use edit for targeted changes. Batch changes to one file in a single call.",
+        "Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions."
+      ],
+      "write": [
+        "Use write only for new files or complete rewrites."
+      ],
+      "codemode": [
+        "Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls."
+      ]
+    },
+    "promptGuidelines": []
+  },
+  "sections": {
+    "tools": "- read: Read file contents\n- bash: Execute bash commands (ls, grep, find, etc.)\n- edit: Make precise file edits with exact text replacement, including multiple disjoint edits in one call\n- write: Create or overwrite files\n- web_search: Web research. Prefer {queries:[...]} with 2-4 varied angles; omit provider unless overriding the default.\n- source_check: Gather source evidence with passage citations for a claim.\n- fetch_content: Use to fetch URL content, direct images, GitHub repos, and videos.\n- get_search_content: Use after web_search, source_check, or fetch_content to read stored content; findText finds passages without paging.\n\nAdditional tools may be available.",
+    "rules": "- Use bash for file operations like ls, rg, find\n- Use read to examine files instead of cat or sed.\n- You can inspect PI_* environment variables for current model and session details.\n- Use edit for targeted changes. Batch changes to one file in a single call.\n- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.\n- Use write only for new files or complete rewrites.\n- Be concise in your responses\n- Show file paths clearly when working with files"
+  }
+}
