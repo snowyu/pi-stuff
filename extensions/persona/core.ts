@@ -3,6 +3,7 @@
  * 接线层负责把 pi 的 options 映射成 PromptFacts，并原子地应用 PersonaDecision。
  */
 import { HFTemplate } from "@isdk/template-engines";
+import picomatch from "picomatch";
 
 export class PersonaError extends Error {}
 
@@ -13,8 +14,25 @@ export type PersonaMeta = {
 	mode?: Mode | "force";
 	on_error?: OnError;
 	tools?: string[] | string;
+	/** 谁的**工具**有资格被声明：glob 匹配 pi 的 SourceInfo（见 toolKeys）。`"*"` = 不过滤。 */
+	extensions?: Gate;
+	/** 谁**追加的提示词**能进 prompt：glob 匹配带 kind 前缀的键（见 appendKeys / agentKeys / skillKeys / sectionKeys）。 */
+	context?: Gate;
 	sections?: Record<string, string | null> | null;
 	description?: string;
+};
+
+/** 一个贡献者的身份，来自 pi 的 SourceInfo；`layer` 是 AGENTS.md 发现出来的层。 */
+export type ToolRef = { name: string; source: string; scope: string; path: string };
+export type SkillRef = { name: string; description?: string; path?: string; source: string; scope: string };
+export type AgentRef = { path: string; content: string; layer?: "global" | "project" | "ancestor" };
+/**
+ * pi 只把**一层** APPEND_SYSTEM.md 交给扩展（项目 > 全局，另一层被跳过，见 docs/persona.md）。
+ * 这两层是人设自己按 pi 的优先级重新发现的，用来让"第二层消失了"这件事可见、可显式要回。
+ */
+export type AppendLayers = {
+	project?: { path: string; content: string };
+	global?: { path: string; content: string };
 };
 
 export type PromptFacts = {
@@ -22,16 +40,37 @@ export type PromptFacts = {
 	now: string;
 	platform: string;
 	toolNames: string[]; // 实时 loadout
+	tools: ToolRef[]; // 与 toolNames 同一批工具的归属信息（pi getAllTools() 的 sourceInfo）
 	hiddenTools: string[];
 	toolSnippets: Record<string, string>;
 	toolGuidelines: Record<string, string[]>;
 	promptGuidelines: string[];
-	skillsPrompt: string; // 接线层用 pi 的 formatSkillsForPrompt 渲染
-	skills: Array<{ name: string; description?: string; path?: string }>;
-	contextFiles: Array<{ path: string; content: string }>;
+	skills: SkillRef[];
+	/** 接线层注入 pi 的 formatSkillsForPrompt：门控砍掉技能后清单由剩下的重渲染；`names` 是**生效**的
+	 * 工具集（front-matter `tools:` / `extensions:` 收窄后），reader 措辞必须按它，不能按实时 loadout。 */
+	renderSkills: (skills: SkillRef[], names?: string[]) => string;
+	contextFiles: AgentRef[];
 	appendSystemPrompt: string;
+	appendLayers: AppendLayers;
+	/** handler 时刻 `options.sections` 里已有的段名——都是别的扩展注入的，人设可以砍。 */
+	foreignSections: string[];
 	customPrompt: string; // pi 解析出的 SYSTEM.md / --system-prompt
 	docsPaths: { readme: string; docs: string; examples: string };
+};
+
+/**
+ * `context:` 门控的结果，供接线层回放到 pi 的 options 上（两种模式都生效——这一层管的是
+ * "别人塞进来的东西"，不是人设自己的正文）。`null` = 没门控，全部保留。
+ */
+export type ContextFilter = {
+	/** 保留 pi 递来的 addendum 文本？ */
+	append: boolean;
+	/** 保留这些 contextFile 路径；null = 全保留。 */
+	agents: string[] | null;
+	/** 保留这些技能名；null = 全保留。 */
+	skills: string[] | null;
+	/** 从 `options.sections` 里删掉这些段名。 */
+	dropSections: string[];
 };
 
 export type PersonaDecision = {
@@ -41,6 +80,9 @@ export type PersonaDecision = {
 	customPrompt?: string;
 	sections?: Record<string, string>;
 	forceSystemPrompt?: string;
+	filter: ContextFilter;
+	/** 本次生效的门控（给 /persona status 和 prompt-notes 复述用）；undefined = 没设。 */
+	gates?: { extensions?: string[]; context?: string[] };
 	warnings: string[];
 };
 
@@ -133,6 +175,10 @@ function parseScalar(raw: string, where: string): unknown {
 		const items = parts.map((p) => p.trim());
 		while (items.length && items.at(-1) === "") items.pop();
 		return items.map((p) => parseScalar(p, where));
+	}
+	if (raw[0] === "!") {
+		// 门控的否定项。裸 `!` 在 YAML 里是 tag，不能当字符串抢下来；报错要告诉人加引号。
+		throw new PersonaError(`front-matter ${where}: bare ! is a YAML tag: quote it as ${JSON.stringify(raw)}`);
 	}
 	if (UNSUPPORTED_START.test(raw)) {
 		throw new PersonaError(`front-matter ${where}: unsupported YAML in ${JSON.stringify(raw)}`);
@@ -270,6 +316,9 @@ export function parsePersona(raw: string): { meta: PersonaMeta; body: string } {
  * `mode` / `on_error` 只接受有限值。写错（`on_error: abort`、`mode: section`）必须报错，
  * 不能静默当成默认值——静默会让扩展看起来没生效。
  */
+/** front-matter 认的全部名字。不在里面的键是打错了字，不是"预留字段"。 */
+const META_KEYS = new Set(["mode", "on_error", "tools", "extensions", "context", "sections", "description"]);
+
 function checkMeta(meta: PersonaMeta): void {
 	const mode = meta.mode;
 	if (mode !== undefined && mode !== "sections" && mode !== "bare" && mode !== "force") {
@@ -286,6 +335,122 @@ function checkMeta(meta: PersonaMeta): void {
 		&& (typeof meta.sections !== "object" || Array.isArray(meta.sections))) {
 		throw new PersonaError("front-matter sections must be a mapping");
 	}
+	for (const key of ["extensions", "context"] as const) {
+		const raw = meta[key];
+		if (raw === undefined || raw === null) continue;
+		try {
+			parseGate(raw);
+		} catch (e) {
+			throw new PersonaError(`front-matter ${key}: ${(e as Error).message.replace(/^front-matter /, "")}`);
+		}
+	}
+	for (const key of Object.keys(meta)) {
+		if (META_KEYS.has(key)) continue;
+		const hint = key === "deny" || key === "allow"
+			? ' - there is no deny:/allow: field; write the exclusion in the same list with "!"'
+			: ` (known keys: ${[...META_KEYS].join(", ")})`;
+		throw new PersonaError(`unknown front-matter key ${JSON.stringify(key)}${hint}`);
+	}
+}
+
+/* ---------------- 门控：front-matter 的 extensions: / context: ----------------
+ *
+ * pi 给每个工具、技能、命令都带了 SourceInfo（`{path, source, scope, origin}`），所以"谁的工
+ * 具"是能问出来的；**追加的提示词问不出来**（`options.appendSystemPrompt` 是一个 join 后的字
+ * 符串，pi 不记作者），所以 `context:` 只能按可归属的单位门控：addendum 这一层、AGENTS.md 的路径
+ * 与层、技能的来源、别的扩展注入的段名。每种贡献都会展开成一组候选键（`*Keys()`），pattern 命中
+ * 任意一个即算命中。
+ *
+ * `!` 前缀是否定。**这个否定是我们实现的，不是 picomatch 的**：picomatch 4 把数组当纯 OR，
+ * `!x` 单独编译成"除 x 外的一切"，`["a", "!b"]` 里后面的否定根本不生效（实测）。所以 front-matter
+ * 里不需要 deny:，但语义得自己写对：allow 全不中 → 出局；命中任一 deny → 出局；allow 为空（全是
+ * 否定）→ 其余都要。
+ *
+ * 单个 pattern 写 `"*"` 表示**全部**（不是 glob 的单层——source 里带 `/`，真 glob 会匹配不上）。
+ * 整个门控写 `"*"` 或 `["*"]` 表示不过滤，跟没写一样。
+ */
+
+export type Gate = string | string[];
+export type GateSpec = { allow: string[]; deny: string[]; patterns: string[]; empty: boolean };
+export type GateHit = { ok: boolean; allow?: string; deny?: string };
+
+export function parseGate(raw: Gate | undefined): GateSpec | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	const list = (Array.isArray(raw) ? raw : [raw]).map((s) => {
+		if (typeof s !== "string") {
+			throw new PersonaError(`must be "*" or a list of glob patterns, got ${JSON.stringify(s)}`);
+		}
+		return s.trim();
+	});
+	const patterns = list.filter(Boolean);
+	// `[]`、`[""]` 都是"显式全关"，不是"没写"：不特判就会落进"全是否定 → 其余都要"那条分支。
+	if (patterns.length === 0) return { allow: [], deny: [], patterns: [], empty: true };
+	if (patterns.length === 1 && patterns[0] === "*") return undefined;
+	const allow: string[] = [];
+	const deny: string[] = [];
+	for (const p of patterns) {
+		if (p[0] !== "!") { allow.push(p); continue; }
+		const bare = p.slice(1).trim();
+		if (!bare) throw new PersonaError(`gate pattern is empty: ${JSON.stringify(p)}`);
+		deny.push(bare);
+	}
+	return { allow, deny, patterns, empty: false };
+}
+
+export function compileGate(spec: GateSpec, platform: string): (cands: string[]) => GateHit {
+	const opts = { dot: true, windows: platform === "win32", nocase: platform === "win32" };
+	const build = (pats: string[]) => pats.map((p) => {
+		try {
+			// `*` 是"全部"，不是 glob 的单层：source/scope 串里带 `/`，真 glob 会漏掉整包来源。
+			const m: (s: string) => boolean = p === "*" ? () => true : picomatch(p, opts);
+			return { p, m };
+		} catch (e) {
+			throw new PersonaError(`glob error in ${JSON.stringify(p)}: ${(e as Error).message}`);
+		}
+	});
+	const allowPats = build(spec.allow);
+	const denyPats = build(spec.deny);
+	return (cands) => {
+		if (spec.empty) return { ok: false };
+		// allow 和 deny 都先算完再定性：只靠 deny 短路的话，被 deny 抢掉的那条 allow 会被当成
+		// "没命中过"，白告一个打错字的警。
+		let deny: string | undefined;
+		for (const { p, m } of denyPats) if (cands.some((c) => m(c))) { deny = p; break; }
+		let allow: string | undefined;
+		for (const { p, m } of allowPats) if (cands.some((c) => m(c))) { allow = p; break; }
+		const ok = deny === undefined && (allowPats.length === 0 || allow !== undefined);
+		return { ok, allow, deny };
+	};
+}
+
+/** 每个 pattern 有没有真的命中过东西——没命中的要报出来，否则打错字就是静默失效。 */
+export function unusedPatterns(spec: GateSpec, hits: GateHit[]): string[] {
+	const used = new Set<string>();
+	for (const h of hits) {
+		if (h.allow) used.add(h.allow);
+		if (h.deny) used.add(`!${h.deny}`);
+	}
+	return spec.patterns.filter((p) => !used.has(p));
+}
+
+/* 候选键：一个贡献者可以被哪些写法命中。顺序稳定，测试直接断言。 */
+export const toolKeys = (t: ToolRef): string[] => [t.source, `${t.source}:${t.scope}`, t.path];
+export const agentKeys = (f: AgentRef): string[] => [`agents:${f.path}`, f.path, ...(f.layer ? [`agents:${f.layer}`] : [])];
+export const skillKeys = (s: SkillRef): string[] => [`skill:${s.source}`, `skill:${s.source}:${s.scope}`, `skill:${s.name}`, s.path ?? ""];
+export const sectionKeys = (tag: string): string[] => [`section:${tag}`, tag];
+export const appendLayerKeys = (scope: "project" | "global", path?: string): string[] => [`append:${scope}`, path ?? ""];
+
+/**
+ * pi 递来的那一份 addendum 是从哪一层来的：等于人设发现的项目层 / 全局层就点名那层，
+ * 都对不上就说 `append:other`（`--append-system-prompt` 或别的扩展改的），不猜。
+ */
+export function appendKeys(text: string, layers: AppendLayers): string[] {
+	if (!text) return ["append:pi", "append:empty"];
+	const keys = ["append:pi"];
+	if (layers.project && text.includes(layers.project.content)) keys.push("append:project");
+	if (layers.global && text.includes(layers.global.content)) keys.push("append:global");
+	if (keys.length === 1) keys.push("append:other");
+	return keys;
 }
 
 /* ---------------- pi 原生段：结构化渲染 ---------------- */
@@ -334,7 +499,7 @@ export function renderDocs(p: PromptFacts["docsPaths"]): string {
 - Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.`;
 }
 
-export function renderProjectContext(files: PromptFacts["contextFiles"]): string {
+export function renderProjectContext(files: AgentRef[]): string {
 	if (!files.length) return "";
 	return [
 		"Project-specific instructions and guidelines:",
@@ -463,6 +628,7 @@ export function renderPromptNotes(input: {
 	undeclared: string[];
 	provider: ProviderSystem;
 	toolsCapture: ProviderTools;
+	gates?: { extensions?: string[]; context?: string[] };
 }): string {
 	const lines: string[] = [
 		"persona prompt notes: nothing in this file is sent to the model",
@@ -471,6 +637,10 @@ export function renderPromptNotes(input: {
 		`snapshot of: the last agent run of this session (persona: ${input.persona}, mode: ${input.mode})`,
 	];
 	if (input.fallback) lines.push(`exported text is a FALLBACK: ${input.fallback}`);
+	if (input.gates?.extensions?.length || input.gates?.context?.length) {
+		const shown = (v?: string[]) => (v && v.length ? JSON.stringify(v) : "*");
+		lines.push(`gates: extensions=${shown(input.gates.extensions)} context=${shown(input.gates.context)} (unlisted = allowed)`);
+	}
 	lines.push(
 		"",
 		"verbatim files, byte-exact (no banners, no commentary inside them):",
@@ -572,12 +742,17 @@ export function resolveOnError(meta: PersonaMeta): OnError {
 }
 
 export function personaTools(meta: PersonaMeta): string[] | undefined {
-	if (!meta.tools) return undefined;
+	if (meta.tools === undefined || meta.tools === null) return undefined;
+	// YAML 里 `tools:` 后面什么都没有就是 null，已上面的早退当"没写"处理。
+	if (typeof meta.tools === "string" && meta.tools.trim() === "") return undefined;
 	const list = Array.isArray(meta.tools)
 		? meta.tools.map((s) => String(s).trim())
 		: String(meta.tools).split(/[,\s]+/);
 	const out = list.filter(Boolean);
-	return out.length ? out : undefined;
+	// `"*"` = 全部（不写 selectedTools，跟实时 loadout）；`[]` = 显式全关。两边语义与
+	// extensions: / context: 一致，否则"忘写"和"不要工具"就分不开。
+	if (out.length === 1 && out[0] === "*") return undefined;
+	return out;
 }
 
 export function decidePersona(input: DecideInput): PersonaDecision {
@@ -586,7 +761,31 @@ export function decidePersona(input: DecideInput): PersonaDecision {
 	const { meta, body } = parsePersona(raw);
 	const warnings: string[] = [];
 
-	const names = personaTools(meta) ?? facts.toolNames;
+	/* ---- front-matter 门控：extensions:（谁的工具有资格）---- */
+	const extSpec = parseGate(meta.extensions);
+	const ctxSpec = parseGate(meta.context);
+	const extHits: GateHit[] = [];
+	let allowedNames: string[] | undefined;
+	if (extSpec) {
+		const match = compileGate(extSpec, facts.platform);
+		const attributed = new Map(facts.tools.map((t) => [t.name, t]));
+		const kept: string[] = [];
+		for (const n of facts.toolNames) {
+			const ref = attributed.get(n) ?? { name: n, source: "unknown", scope: "unknown", path: n };
+			if (!attributed.has(n)) {
+				warnings.push(`no source info for tool ${n}; extensions: treats it as source "unknown"`);
+			}
+			const hit = match(toolKeys(ref));
+			extHits.push(hit);
+			if (hit.ok) kept.push(n);
+		}
+		if (extSpec.empty) warnings.push('extensions: gate is an empty pattern list, so nothing matches; use "*" for no filter');
+		for (const p of unusedPatterns(extSpec, extHits)) {
+			warnings.push(`extensions: pattern matched nothing: ${JSON.stringify(p)}`);
+		}
+		allowedNames = kept;
+	}
+
 	// facts.customPrompt 只可能来自 SYSTEM.md / --system-prompt：pi 每轮对 base options 做一份归一化
 	// 副本交给 handler，我们对副本的修改不会回流。所以这条只防一种情况：人设正文就是
 	// `{{ system_md }}`，渲染结果恰好等于 SYSTEM.md——不防就会每轮把 system_md 变空、来回抖。
@@ -604,6 +803,47 @@ export function decidePersona(input: DecideInput): PersonaDecision {
 	}
 	const docs = extractedDocs ?? (piRendersDocs ? renderDocs(facts.docsPaths) : "");
 
+	/* ---- front-matter 门控：context:（谁追加的提示词能进来）---- */
+	const filter: ContextFilter = { append: true, agents: null, skills: null, dropSections: [] };
+	let appendSystem = facts.appendSystemPrompt;
+	let appendProject = facts.appendLayers.project?.content ?? "";
+	let appendGlobal = facts.appendLayers.global?.content ?? "";
+	let agentFiles = facts.contextFiles;
+	let skills = facts.skills;
+	if (ctxSpec) {
+		const match = compileGate(ctxSpec, facts.platform);
+		const ctxHits: GateHit[] = [];
+		const hit = (cands: string[]): boolean => {
+			const h = match(cands);
+			ctxHits.push(h);
+			return h.ok;
+		};
+		filter.append = hit(appendKeys(facts.appendSystemPrompt, facts.appendLayers));
+		if (!filter.append) appendSystem = "";
+		if (!hit(appendLayerKeys("project", facts.appendLayers.project?.path))) appendProject = "";
+		if (!hit(appendLayerKeys("global", facts.appendLayers.global?.path))) appendGlobal = "";
+		agentFiles = facts.contextFiles.filter((f) => hit(agentKeys(f)));
+		filter.agents = agentFiles.map((f) => f.path);
+		skills = facts.skills.filter((s) => hit(skillKeys(s)));
+		filter.skills = skills.map((s) => s.name);
+		filter.dropSections = facts.foreignSections.filter((tag) => !hit(sectionKeys(tag)));
+		if (ctxSpec.empty) warnings.push('context: gate is an empty pattern list, so nothing matches; use "*" for no filter');
+		for (const p of unusedPatterns(ctxSpec, ctxHits)) {
+			warnings.push(`context: pattern matched nothing: ${JSON.stringify(p)}`);
+		}
+	}
+
+	// tools: 和 extensions: 同时在场就是交集：门控砍掉的名字必须说破，否则人设作者只会看到工具少了。
+	const wanted = personaTools(meta);
+	let names = wanted ?? allowedNames ?? facts.toolNames;
+	if (wanted && allowedNames) {
+		const allowedSet = new Set(allowedNames);
+		const dropped = wanted.filter((n) => !allowedSet.has(n));
+		if (dropped.length) warnings.push(`tools: ${dropped.join(", ")} is not allowed by extensions:`);
+		names = wanted.filter((n) => allowedSet.has(n));
+	}
+	const selectedTools = wanted ? names : allowedNames;
+
 	const data: Record<string, unknown> = {
 		persona: name,
 		cwd: facts.cwd,
@@ -616,16 +856,18 @@ export function decidePersona(input: DecideInput): PersonaDecision {
 		pi_docs: extractedDocs ?? "{{ pi_docs }}",
 		// pi 1.5.2 只填 toolGuidelines，顶层 promptGuidelines 恒为空（fixture 里也是 []）。
 		// 照实渲染：将来 pi 填了自动生效，今天别指望它有内容。
-		project_context: renderProjectContext(facts.contextFiles),
-		skills_prompt: facts.skillsPrompt,
-		append_system: facts.appendSystemPrompt,
+		project_context: renderProjectContext(agentFiles),
+		skills_prompt: facts.renderSkills(skills, names),
+		append_system: appendSystem,
+		append_project: appendProject,
+		append_global: appendGlobal,
 		system_md: systemMd,
 		tool_names: declared(facts, names),
 		tool_snippets: { ...facts.toolSnippets },
 		tool_guidelines: { ...facts.toolGuidelines },
 		prompt_guidelines: [...facts.promptGuidelines],
-		agents: facts.contextFiles.map((f) => ({ ...f })),
-		skills: facts.skills.map((s) => ({ ...s })),
+		agents: agentFiles.map((f) => ({ ...f })),
+		skills: skills.map((s) => ({ ...s })),
 	};
 	if (!extractedDocs) warnings.push("pi_docs unavailable; literal placeholder kept");
 	data.include = makeInclude(input.readTemplate, data, [name]);
@@ -644,10 +886,12 @@ export function decidePersona(input: DecideInput): PersonaDecision {
 		}
 	}
 
-	const wanted = personaTools(meta);
+	const gates = extSpec || ctxSpec
+		? { extensions: extSpec?.patterns, context: ctxSpec?.patterns }
+		: undefined;
 	return mode === "bare"
-		? { persona: name, mode, selectedTools: wanted, forceSystemPrompt: text, warnings }
-		: { persona: name, mode, selectedTools: wanted, customPrompt: text, sections, warnings };
+		? { persona: name, mode, selectedTools, forceSystemPrompt: text, filter, gates, warnings }
+		: { persona: name, mode, selectedTools, customPrompt: text, sections, filter, gates, warnings };
 }
 
 /* ---------------- 状态优先级（纯） ---------------- */

@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
 
 const EXTENSION = new URL("../../extensions/persona", import.meta.url).pathname;
+const CONTRIBUTOR = new URL("../fixtures/contributor.ts", import.meta.url).pathname;
 
 /**
  * A throwaway agent dir: pi and persona both read PI_CODING_AGENT_DIR, and an empty `packages`
@@ -34,6 +35,8 @@ async function runPersonaScenario(
 	environment: Record<string, string> = {},
 	project: Record<string, string> = {},
 	systemPrompt?: string,
+	agentFiles: Record<string, string> = {},
+	extraExtensions: string[] = [],
 ) {
 	const workspace = mkdtempSync(join(tmpdir(), "pi-stuff-persona-real-ws-"));
 	for (const [path, contents] of Object.entries(project)) {
@@ -46,10 +49,10 @@ async function runPersonaScenario(
 		artifactsDir: testArtifactsDir(import.meta.filename),
 		transport: "rpc",
 		cwd: workspace,
-		extensions: [EXTENSION],
+		extensions: [EXTENSION, ...extraExtensions],
 		...(systemPrompt === undefined ? {} : { systemPrompt }),
 		conversation: [assistantMessage([text("done")])],
-		environment: { PI_CODING_AGENT_DIR: testAgentDir(), ...environment },
+		environment: { PI_CODING_AGENT_DIR: testAgentDir(agentFiles), ...environment },
 	}).run("say hi");
 	return { run, workspace };
 }
@@ -152,5 +155,48 @@ describe("persona against a real pi process", () => {
 		assert.match(prompt, /coding assistant running inside pi/);
 		assert.match(prompt, /<tools>/);
 		assert.ok(!prompt.includes("pirate coding matey"));
+	});
+
+	test("extensions: is answered by pi's own SourceInfo: a real run knows who registered the tool", async () => {
+		// Baseline first: the loaded fixture's tool really is declared, so its absence below is the gate.
+		const all = await runPersonaScenario("gate-off", { PI_PERSONA: "listing" }, {
+			".pi/personas/listing.md": "Listing.\n\n{{ tools }}\n",
+		}, undefined, {}, [CONTRIBUTOR]);
+		assert.match(getSystemPrompt(all.run), /- probe_tool: probe the fixture/);
+
+		const gated = await runPersonaScenario("gate-builtin", { PI_PERSONA: "builtinonly" }, {
+			".pi/personas/builtinonly.md": '---\nextensions: ["builtin"]\n---\nBuiltins only.\n\n{{ tools }}\n',
+		}, undefined, {}, [CONTRIBUTOR]);
+		const prompt = getSystemPrompt(gated.run);
+		assert.match(prompt, /- read:/, "pi's own tools stay");
+		assert.ok(!prompt.includes("probe_tool"), "the tool another extension registered is out of the prompt");
+	});
+
+	test("tools: [] in a real run declares nothing and leaves pi's (none) in <tools>", async () => {
+		const { run } = await runPersonaScenario("no-tools", { PI_PERSONA: "notools" }, {
+			".pi/personas/notools.md": "---\ntools: []\n---\nEmpty.\n\n{{ tools }}\n",
+		});
+		const prompt = getSystemPrompt(run);
+		assert.match(prompt, /<tools>\n\(none\)/, "显式全关不是把段弄没，是 pi 自己的 (none)");
+		assert.ok(!prompt.includes("- read:"), "一个工具也不声明");
+	});
+
+	test("APPEND_SYSTEM.md: pi ships one layer, and {{ append_global }} is how a persona asks for the other", async () => {
+		// Both layers exist. pi loads exactly one (project wins, the agent-dir file is skipped —
+		// resource-loader.js discoverAppendSystemPromptFile), so "my global rules disappeared" is a real
+		// failure mode. The persona re-discovers both with pi's own precedence and labels them, so an
+		// author can ask for the layer pi skipped instead of silently losing it.
+		const { run } = await runPersonaScenario(
+			"append-layers",
+			{ PI_PERSONA: "layers" },
+			{ ".pi/personas/layers.md": "Layers.\n\nglobal=[{{ append_global }}] project=[{{ append_project }}] pi=[{{ append_system }}]\n", ".pi/APPEND_SYSTEM.md": "project layer rules\n" },
+			undefined,
+			{ "APPEND_SYSTEM.md": "global layer rules\n" },
+		);
+		const prompt = getSystemPrompt(run);
+		assert.match(prompt, /pi=\[project layer rules/, "pi really shipped the project layer");
+		assert.match(prompt, /project=\[project layer rules\]/, "the layer pi shipped");
+		assert.match(prompt, /global=\[global layer rules\]/, "the layer pi skipped is reachable on purpose, not invented");
+		assert.ok(!/pi=\[[^\]]*global layer/.test(prompt), "{{ append_system }} 里只有一份：不能假称 pi 追了两层");
 	});
 });

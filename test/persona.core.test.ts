@@ -33,6 +33,16 @@ import {
 	extractProviderTools,
 	renderPromptNotes,
 	summarizeParameters,
+	parseGate,
+	compileGate,
+	appendKeys,
+	appendLayerKeys,
+	agentKeys,
+	skillKeys,
+	toolKeys,
+	sectionKeys,
+	type GateSpec,
+	type ToolRef,
 } from "../extensions/persona/core.ts";
 
 const F: PromptFacts = {
@@ -44,12 +54,18 @@ const F: PromptFacts = {
 	toolSnippets: { read: "Read files", bash: "Run commands" },
 	toolGuidelines: { read: ["Use read instead of cat."] },
 	promptGuidelines: ["Custom rule."],
-	skillsPrompt: "",
 	skills: [],
+	renderSkills: () => "",
 	contextFiles: [],
 	appendSystemPrompt: "",
+	appendLayers: {},
+	foreignSections: [],
 	customPrompt: "",
 	docsPaths: { readme: "/R.md", docs: "/docs", examples: "/ex" },
+	tools: [
+		{ name: "read", source: "builtin", scope: "user", path: "builtin:read" },
+		{ name: "bash", source: "builtin", scope: "user", path: "builtin:bash" },
+	],
 };
 
 const run = (raw: string, over: Partial<Parameters<typeof decidePersona>[0]> = {}) =>
@@ -167,6 +183,11 @@ describe("sections spec", () => {
 		assert.deepEqual(personaTools({ tools: "read bash" }), ["read", "bash"]);
 		assert.equal(personaTools({}), undefined);
 		assert.equal(personaTools({ tools: "  " }), undefined);
+		// 空列表与门控同一个语义：显式全关，不是"当没写"。`"*"` 才是全部（跟随实时 loadout）。
+		assert.deepEqual(personaTools({ tools: [] }), []);
+		assert.deepEqual(personaTools(parsePersona("---\ntools: []\n---\nx\n").meta), []);
+		assert.equal(personaTools({ tools: "*" }), undefined);
+		assert.deepEqual(personaTools({ tools: ["", ""] }), []);
 	});
 });
 
@@ -487,5 +508,248 @@ describe("the request view: the whole system role, not only its text", () => {
 			toolsCapture: { note: "not written: unrecognized payload shape" },
 		});
 		assert.match(notes, /provider system text: unrecognized payload shape \(keys: foo\)/);
+	});
+});
+
+describe("front-matter gates: extensions: (whose tools) and context: (what gets appended)", () => {
+	/* pi 的归属信息（SourceInfo）在人设里被压成三类键，见 core.ts 的 *Keys()。 */
+	// pi 本轮真的渲染过 <docs>，这样 warning 里只剩门控自己的话，断言才只数门控。
+		// sections 只在 sections 模式下存在；门控测试全都跑 sections 模式，所以统一走 sec()。
+	const sec = (d: ReturnType<typeof gateRun>): Record<string, string> => d.sections ?? {};
+const gateRun = (raw: string, over: Partial<Parameters<typeof decidePersona>[0]> = {}) =>
+		run(raw, { piPromptText: "<docs>\nPi documentation…\n</docs>", ...over });
+	const MANY: ToolRef[] = [
+		{ name: "read", source: "builtin", scope: "user", path: "builtin:read" },
+		{ name: "bash", source: "builtin", scope: "user", path: "builtin:bash" },
+		{ name: "web_search", source: "git:github.com/snowyu/pi-stuff", scope: "user", path: "/inst/extensions/persona/index.ts" },
+		{ name: "ssh_run", source: "local", scope: "project", path: "/proj/.pi/extensions/ssh.ts" },
+	];
+	const factsWith = (over: Partial<PromptFacts>): PromptFacts => ({ ...F, ...over });
+	const many = (over: Partial<PromptFacts> = {}) =>
+		factsWith({ tools: MANY, toolNames: MANY.map((t) => t.name), toolSnippets: Object.fromEntries(MANY.map((t) => [t.name, `does ${t.name}`])), ...over });
+
+	test("parseGate: omitted, \"*\" and [\"*\"] all mean no filtering", () => {
+		assert.equal(parseGate(undefined), undefined);
+		assert.equal(parseGate("*"), undefined);
+		assert.equal(parseGate(["*"]), undefined);
+		assert.equal(parseGate("  *  "), undefined, "front-matter padding may not turn off the filter");
+	});
+	test("parseGate splits ! negations out of the allow list", () => {
+		const g = parseGate(["builtin", "!local:project"]) as GateSpec;
+		assert.deepEqual(g.allow, ["builtin"]);
+		assert.deepEqual(g.deny, ["local:project"]);
+		const onlyDeny = parseGate(["!git:github.com/snowyu/*"]) as GateSpec;
+		assert.deepEqual(onlyDeny.allow, [], "an all-negation list means everything else");
+		assert.deepEqual(onlyDeny.deny, ["git:github.com/snowyu/*"]);
+	});
+	test("parseGate: [] is kept as an empty gate, not folded into \"no filter\"", () => {
+		const g = parseGate([]) as GateSpec;
+		assert.deepEqual(g.allow, []);
+		assert.deepEqual(g.deny, []);
+		assert.equal(g.empty, true);
+	});
+	test("front-matter: a bare `*` is refused by the YAML subset, so the quoted form is the only one", () => {
+		assert.throws(() => parsePersona("---\nextensions: *\n---\nx\n"), /unsupported YAML/);
+		assert.throws(() => parsePersona("---\ncontext: [\"*\", !append:pi]\n---\nx\n"), /bare ! is a YAML tag/);
+		assert.deepEqual(parsePersona('---\nextensions: "*"\n---\nx\n').meta.extensions, "*");
+		assert.deepEqual(parsePersona('---\ncontext:\n  - "!append:global"\n---\nx\n').meta.context, ["!append:global"]);
+	});
+	test("块数组里裸写 `!` 仍报错（YAML 里那是 tag），但得说破怎么修", () => {
+		assert.throws(
+			() => parsePersona('---\ncontext:\n  - "*"\n  - !append:global\n---\nhi\n'),
+			/bare ! is a YAML tag: quote it as "!append:global"/,
+		);
+	});
+
+	test("front-matter 里的陌生键报错：`deny:` 已被 `!` 取代，静默忽略会让人以为门控生效了", () => {
+		assert.throws(() => parsePersona("---\ndeny: [\"local:project\"]\n---\nx\n"), /unknown front-matter key "deny"/);
+		assert.throws(() => parsePersona("---\ndeny: [\"local:project\"]\n---\nx\n"), /write the exclusion in the same list with "!"/);
+		assert.throws(() => parsePersona("---\nextentions: [\"builtin\"]\n---\nx\n"), /unknown front-matter key "extentions"/);
+	});
+
+	test("front-matter: gates reject wrong types instead of ignoring them", () => {
+		assert.throws(() => parsePersona("---\nextensions: true\n---\nx\n"), /extensions: must be "\*" or a list of glob patterns/);
+		assert.throws(() => parsePersona("---\ncontext:\n  a: b\n---\nx\n"), /context: must be "\*" or a list of glob patterns/);
+	});
+
+	test("toolKeys / agentKeys / skillKeys / sectionKeys: the candidate keys a pattern may match", () => {
+		assert.deepEqual(toolKeys(MANY[2]), ["git:github.com/snowyu/pi-stuff", "git:github.com/snowyu/pi-stuff:user", "/inst/extensions/persona/index.ts"]);
+		assert.deepEqual(agentKeys({ path: "/home/u/.pi/AGENTS.md", content: "", layer: "global" }), ["agents:/home/u/.pi/AGENTS.md", "/home/u/.pi/AGENTS.md", "agents:global"]);
+		assert.deepEqual(skillKeys({ name: "pdf", source: "local", scope: "project", path: "/proj/.pi/skills/pdf/SKILL.md" }),
+			["skill:local", "skill:local:project", "skill:pdf", "/proj/.pi/skills/pdf/SKILL.md"]);
+		assert.deepEqual(sectionKeys("proxy_guard"), ["section:proxy_guard", "proxy_guard"]);
+	});
+	test("appendKeys labels where pi's single addendum text came from; appendLayerKeys the two files", () => {
+		const layers = { project: { path: "/proj/.pi/APPEND_SYSTEM.md", content: "project rules" }, global: { path: "/u/.pi/agent/APPEND_SYSTEM.md", content: "global rules" } };
+		assert.deepEqual(appendKeys("project rules", layers), ["append:pi", "append:project"]);
+		assert.deepEqual(appendKeys("global rules", layers), ["append:pi", "append:global"]);
+		assert.deepEqual(appendKeys("flag text", layers), ["append:pi", "append:other"], "an unattributable layer must say so, not guess");
+		assert.deepEqual(appendKeys("", layers), ["append:pi", "append:empty"]);
+		assert.deepEqual(appendLayerKeys("global", layers.global?.path), ["append:global", "/u/.pi/agent/APPEND_SYSTEM.md"]);
+	});
+	test("compileGate: a bare `*` pattern means everything, not one path segment", () => {
+		const m = compileGate(parseGate(["*", "!section:evil"]) as GateSpec, "linux");
+		assert.equal(m(sectionKeys("notes")).ok, true);
+		assert.equal(m(sectionKeys("evil")).ok, false);
+		assert.equal(compileGate(parseGate(["*", "!nothing:here"]) as GateSpec, "linux")(toolKeys(MANY[2])).ok, true);
+	});
+	test("a gate pattern that is nothing but `!` is refused, not treated as a deny-all", () => {
+		assert.throws(() => parsePersona('---\ncontext: ["!"]\n---\nx\n'), /gate pattern is empty/);
+	});
+
+	test("extensions: [\"builtin\"] keeps pi's own tools and drops the ones other extensions registered", () => {
+		const d = gateRun('---\nextensions: ["builtin"]\n---\nhi\n', { facts: many() });
+		assert.deepEqual(d.selectedTools, ["read", "bash"]);
+		assert.match(d.customPrompt ?? "", /^hi$/, "the body is only the preamble");
+		assert.doesNotMatch(sec(d).tools ?? "", /web_search|ssh_run/);
+		assert.deepEqual(d.warnings, []);
+	});
+	test("extensions: [\"!local:project\"] is the whole loadout minus that one source", () => {
+		const d = gateRun('---\nextensions: ["!local:project"]\n---\nhi\n', { facts: many() });
+		assert.deepEqual(d.selectedTools, ["read", "bash", "web_search"]);
+	});
+	test("extensions: matches a package source glob and a path glob equally", () => {
+		const pkg = gateRun('---\nextensions: ["git:github.com/snowyu/*"]\n---\nhi\n', { facts: many() });
+		assert.deepEqual(pkg.selectedTools, ["web_search"]);
+		const byPath = gateRun('---\nextensions: ["**/fixtures/*", "builtin"]\n---\nhi\n', {
+			facts: many({ tools: [...MANY, { name: "probe", source: "cli", scope: "temporary", path: "/t/test/fixtures/tool-extra.ts" }], toolNames: [...MANY.map((t) => t.name), "probe"], toolSnippets: { ...Object.fromEntries(MANY.map((t) => [t.name, "s"])), probe: "s" } }),
+		});
+		assert.ok((byPath.selectedTools ?? []).includes("probe"));
+	});
+	test("tools: [] 是显式全关：不声明任何工具，prompt 里是 pi 自己的 (none)", () => {
+		const d = gateRun("---\ntools: []\n---\nhi\n", { facts: many() });
+		assert.deepEqual(d.selectedTools, []);
+		assert.equal(sec(d).tools, "(none)\n\nAdditional tools may be available.", "与 pi 同：没工具就是 (none)，不是空段");
+		assert.ok(!sec(d).rules.includes("Use bash for file operations"), "没声明 bash 就不该有 bash 那条 guideline");
+		assert.deepEqual(d.warnings, [], "tools: [] 是明确意图，不告警");
+	});
+	test("tools: [] 与 extensions: 同时在场所见即所得：还是全关", () => {
+		const d = gateRun('---\ntools: []\nextensions: ["builtin"]\n---\nhi\n', { facts: many() });
+		assert.deepEqual(d.selectedTools, []);
+		assert.equal(sec(d).tools, "(none)\n\nAdditional tools may be available.");
+	});
+	test("tools: \"*\" 就是全部（跟随实时 loadout），而不是一个叫 `*` 的工具", () => {
+		const d = gateRun('---\ntools: "*"\n---\nhi\n', { facts: many() });
+		assert.equal(d.selectedTools, undefined, "不写 selectedTools，pi 用实时 loadout");
+		assert.match(sec(d).tools, /- read: /);
+	});
+	test("skills 清单的 reader 措辞按**生效**工具集，不按实时 loadout：tools: [] 时不许点名 read", () => {
+		const facts = factsWith({
+			skills: [{ name: "pdf", description: "d", path: "/s/pdf/SKILL.md", source: "local", scope: "user" }],
+			renderSkills: (_s, names) => (names?.includes("read") ? "read the file with read" : "no reader is named"),
+		});
+		assert.equal(sec(gateRun('---\nsections:\n  skills: "{{ skills_prompt }}"\n---\nhi\n', { facts })).skills, "read the file with read");
+		assert.equal(sec(gateRun('---\ntools: []\nsections:\n  skills: "{{ skills_prompt }}"\n---\nhi\n', { facts })).skills, "no reader is named");
+		assert.equal(sec(gateRun('---\ntools: [bash]\nsections:\n  skills: "{{ skills_prompt }}"\n---\nhi\n', { facts })).skills, "no reader is named");
+	});
+
+	test("tools: and extensions: intersect, and a name the gate dropped is reported", () => {
+		const d = gateRun('---\ntools: [read, ssh_run]\nextensions: ["builtin"]\n---\nhi\n', { facts: many() });
+		assert.deepEqual(d.selectedTools, ["read"]);
+		assert.equal(d.warnings.length, 1);
+		assert.match(d.warnings[0], /tools: ssh_run is not allowed by extensions:/);
+	});
+	test("a gate pattern that matched nothing warns, so a typo is visible", () => {
+		const d = gateRun('---\nextensions: ["builtin", "git:github.com/typo/*", "!local:nowhere"]\n---\nhi\n', { facts: many() });
+		// 有 allow 就是白名单：没命中的工具出局，打错的那条 pattern 得自己招了。
+		assert.deepEqual(d.selectedTools, ["read", "bash"]);
+		assert.equal(d.warnings.length, 2);
+		assert.match(d.warnings[0], /extensions: pattern matched nothing: "git:github.com\/typo\/\*"/);
+		assert.match(d.warnings[1], /extensions: pattern matched nothing: "!local:nowhere"/);
+	});
+	test("an empty gate list warns and drops everything it gates", () => {
+		const d = gateRun('---\nextensions: []\n---\nhi\n', { facts: many() });
+		assert.deepEqual(d.selectedTools, []);
+		assert.match(d.warnings.join("\n"), /extensions: gate is an empty pattern list/);
+	});
+	test("一个只写了空串的列表也是“全关”，不是“不过滤”", () => {
+		assert.deepEqual(parseGate([""]), { allow: [], deny: [], patterns: [], empty: true });
+		const d = gateRun('---\ncontext: [""]\n---\nhi\n', { facts: factsWith({ foreignSections: ["evil"] }) });
+		assert.deepEqual(d.filter.agents, []);
+		assert.deepEqual(d.filter.skills, []);
+		assert.equal(d.filter.append, false);
+		assert.match(d.warnings.join("\n"), /context: gate is an empty pattern list/);
+	});
+
+	test("context: unset keeps every contribution pi gave us, exactly as before", () => {
+		const facts = factsWith({
+			contextFiles: [{ path: "/proj/AGENTS.md", content: "A", layer: "project" }],
+			appendSystemPrompt: "ADD",
+			skills: [{ name: "pdf", source: "local", scope: "user", path: "/u/.pi/skills/pdf/SKILL.md" }],
+			renderSkills: (s) => s.map((x) => `- ${x.name}`).join("\n"),
+			foreignSections: ["proxy_guard"],
+		});
+		const d = run("---\nhi\n", { facts });
+		assert.equal(d.filter.append, true);
+		assert.equal(d.filter.agents, null);
+		assert.equal(d.filter.skills, null);
+		assert.deepEqual(d.filter.dropSections, []);
+		assert.equal(sec(d).addendum, "ADD");
+		assert.equal(sec(d).skills, "- pdf");
+		assert.match(sec(d).project_context ?? "", /A/);
+	});
+	test("context: [\"!append:*\"] silences the addendum, and the empty section disappears", () => {
+		const d = gateRun('---\ncontext: ["!append:*", "*", "section:*"]\n---\nhi\n', {
+			facts: factsWith({ appendSystemPrompt: "ADD" }),
+		});
+		assert.equal(d.filter.append, false);
+		assert.equal(sec(d).addendum, undefined, "an empty section may not reach the model");
+	});
+	test("context: gates AGENTS.md by layer and by path glob", () => {
+		const facts = factsWith({
+			contextFiles: [
+				{ path: "/proj/AGENTS.md", content: "P", layer: "project" },
+				{ path: "/home/u/AGENTS.md", content: "G", layer: "global" },
+				{ path: "/proj/vendor/AGENTS.md", content: "V", layer: "ancestor" },
+			],
+		});
+		const byLayer = gateRun('---\ncontext: ["agents:project"]\n---\nhi\n', { facts });
+		assert.deepEqual(byLayer.filter.agents, ["/proj/AGENTS.md"]);
+		assert.match(sec(byLayer).project_context ?? "", /\nP\n/);
+		assert.doesNotMatch(sec(byLayer).project_context ?? "", /\nG\n|\nV\n/);
+		const byPath = gateRun('---\ncontext: ["*", "!**/vendor/**"]\n---\nhi\n', { facts });
+		assert.deepEqual(byPath.filter.agents, ["/proj/AGENTS.md", "/home/u/AGENTS.md"]);
+	});
+	test("context: gates skills, and the skills list is re-rendered from what survived", () => {
+		const facts = factsWith({
+			skills: [
+				{ name: "pdf", source: "local", scope: "user", path: "/u/.pi/skills/pdf/SKILL.md" },
+				{ name: "ssh", source: "git:github.com/untrusted/pkg", scope: "user", path: "/x/skills/ssh/SKILL.md" },
+			],
+			renderSkills: (s) => s.map((x) => `- ${x.name}`).join("\n"),
+		});
+		const d = gateRun('---\ncontext: ["skill:local:user"]\n---\nhi\n', { facts });
+		assert.deepEqual(d.filter.skills, ["pdf"]);
+		assert.equal(sec(d).skills, "- pdf");
+	});
+	test("context: [\"!section:evil\"] deletes only that foreign section", () => {
+		const d = gateRun('---\ncontext: ["*", "!section:evil"]\n---\nhi\n', {
+			facts: factsWith({ foreignSections: ["proxy_guard", "evil"] }),
+		});
+		assert.deepEqual(d.filter.dropSections, ["evil"]);
+	});
+	test("append:project / append:global are the two APPEND_SYSTEM.md layers, and each can be silenced", () => {
+		const facts = factsWith({
+			appendSystemPrompt: "GLOBAL",
+			appendLayers: { global: { path: "/u/.pi/agent/APPEND_SYSTEM.md", content: "GLOBAL" } },
+		});
+		const both = gateRun('---\nsections:\n  addendum: "{{ append_global }}|{{ append_project }}"\n---\nhi\n', { facts });
+		assert.equal(sec(both).addendum, "GLOBAL|", "the project layer is empty, so nothing is invented");
+		const off = gateRun('---\nsections:\n  addendum: "{{ append_global }}|{{ append_project }}"\ncontext: ["*", "!append:global"]\n---\nhi\n', { facts });
+		assert.equal(sec(off).addendum, "|", "the gate silences the layer it names");
+	});
+	test("prompt notes 记下生效的门控：门控改了上线内容，notes 不写就没法排查", () => {
+		const base = {
+			at: "x", mode: "sections" as const, declared: [], undeclared: [],
+			provider: { text: "t", source: "system blocks" },
+			toolsCapture: { tools: [{ name: "read" }], source: "payload tools" },
+		};
+		const on = gateRun('---\nextensions: ["builtin"]\ncontext: ["*", "!append:other"]\n---\nhi\n');
+		assert.match(
+			renderPromptNotes({ ...base, persona: "gated", gates: on.gates }),
+			/^gates: extensions=\["builtin"\] context=\["\*","!append:other"\] \(unlisted = allowed\)$/m,
+		);
+		const off = gateRun("---\nmode: sections\n---\nhi\n");
+		assert.doesNotMatch(renderPromptNotes({ ...base, persona: "plain", gates: off.gates }), /gates:/, "没设门控就不写这一行");
 	});
 });

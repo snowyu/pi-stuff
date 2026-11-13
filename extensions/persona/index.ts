@@ -7,6 +7,7 @@ import {
 	type BuildSystemPromptOptions,
 	type ExtensionAPI,
 	type ExtensionContext,
+	CONFIG_DIR_NAME,
 	formatSkillsForPrompt,
 	getAgentDir,
 	getDocsPath,
@@ -17,6 +18,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import {
+	type AppendLayers,
 	type DeclaredTool,
 	type Mode,
 	type PersonaDecision,
@@ -24,7 +26,10 @@ import {
 	type ProviderTools,
 	type PersonaMeta,
 	type PromptFacts,
+	type SkillRef,
+	type ToolRef,
 	assertSafeName,
+	type Gate,
 	decidePersona,
 	extractProviderSystem,
 	extractProviderTools,
@@ -46,7 +51,7 @@ const SELF_DIR = dirname(fileURLToPath(import.meta.url));
 /* ---------- 搜索路径 ---------- */
 const dirs = (cwd: string): string[] => [
 	...(process.env.PI_PERSONAS_PATH ?? "").split(":").map((s) => s.trim()).filter(Boolean),
-	join(cwd, ".pi", "personas"),
+	join(cwd, CONFIG_DIR_NAME, "personas"),
 	join(getAgentDir(), "personas"),
 	join(SELF_DIR, "personas"),
 	join(SELF_DIR, "..", "..", "personas"),
@@ -81,6 +86,17 @@ function readSafe(cwd: string, name: string): string | undefined {
 }
 
 const statePath = () => join(getAgentDir(), "personas", "current");
+
+/**
+ * `/persona status` 的门控行。front-matter 写了什么就说什么——切了人设还没跑时也要看得见，
+ * 否则"为什么工具少了"只能等到跑一轮才知道。没跑过时标出来，不假称已经生效。
+ */
+function gateLine(meta: PersonaMeta | undefined, applied: PersonaDecision["gates"]): string {
+	const shown = (raw: Gate | undefined) => (raw === undefined ? "*" : JSON.stringify(Array.isArray(raw) ? raw : [raw]));
+	const line = `gates: extensions=${shown(meta?.extensions)} context=${shown(meta?.context)}`;
+	const declared = meta !== undefined && (meta.extensions !== undefined || meta.context !== undefined);
+	return line + (declared && !applied ? " (front-matter; no run has applied them yet)" : "");
+}
 const readState = (): string => {
 	try {
 		return existsSync(statePath()) ? readFileSync(statePath(), "utf8").trim() : "";
@@ -90,27 +106,89 @@ const readState = (): string => {
 };
 
 /* ---------- facts 映射 ---------- */
-function facts(o: BuildSystemPromptOptions, toolNames: string[]): PromptFacts {
+
+const norm = (p: string): string => p.replace(/\\/g, "/").replace(/\/+$/, "");
+
+/** AGENTS.md 在哪一层：agent 目录 = global，cwd 本级 = project，再往上的祖先目录 = ancestor。 */
+function agentLayer(path: string, cwd: string, agentDir: string): "global" | "project" | "ancestor" {
+	const p = norm(path);
+	if (p.startsWith(`${norm(agentDir)}/`)) return "global";
+	if (p.slice(0, p.lastIndexOf("/")) === norm(cwd)) return "project";
+	return "ancestor";
+}
+
+/**
+ * 人设自己重新发现两层 APPEND_SYSTEM.md，为的是让"另一层被 pi 跳过了"可见。
+ *
+ * pi 只交一份（resource-loader.js 的 discoverAppendSystemPromptFile：项目层需 trust，命中就
+ * return，全局层直接被跳过）。所以这里两份都读，但它们不等于上线的那一份——`append:pi` 才是，
+ * `append:project` / `append:global` 是人设可以自己点名要回的层。
+ */
+function discoverAppendLayers(cwd: string, trusted: boolean): AppendLayers {
+	const read = (p: string): string => readFileSync(p, "utf8").replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").trim();
+	const out: AppendLayers = {};
+	try {
+		const project = join(cwd, CONFIG_DIR_NAME, "APPEND_SYSTEM.md");
+		if (trusted && existsSync(project)) out.project = { path: project, content: read(project) };
+		const global = join(getAgentDir(), "APPEND_SYSTEM.md");
+		if (existsSync(global)) out.global = { path: global, content: read(global) };
+	} catch { /* 发现失败就是没有层：不拿半截内容冒充 */ }
+	return out;
+}
+
+function facts(
+	o: BuildSystemPromptOptions,
+	toolNames: string[],
+	attrib: Map<string, { path: string; source: string; scope: string }>,
+	layers: AppendLayers,
+	cwd: string,
+): PromptFacts {
 	const hidden = o.hiddenTools ?? [];
 	const vis = toolNames.filter((n) => !hidden.includes(n));
 	const reader = vis.includes("read") ? "read"
 		: vis.includes("bash") ? "bash"
 		: toolNames.some((n) => n === "read" || n === "bash") ? "indirect" : undefined;
 	const skills = o.skills ?? [];
+	const refs = (list: typeof skills): SkillRef[] => list.map((s) => ({
+		name: s.name,
+		description: s.description,
+		path: s.filePath,
+		source: s.sourceInfo?.source ?? "unknown",
+		scope: s.sourceInfo?.scope ?? "unknown",
+	}));
+	const tools: ToolRef[] = toolNames.map((n) => {
+		const s = attrib.get(n);
+		return { name: n, source: s?.source ?? "unknown", scope: s?.scope ?? "unknown", path: s?.path ?? n };
+	});
+	const agentDir = getAgentDir();
 	return {
 		cwd: o.cwd,
 		now: new Date().toISOString(),
 		platform: process.platform,
 		toolNames,
+		tools,
 		hiddenTools: hidden,
 		toolSnippets: { ...(o.toolSnippets ?? {}) },
 		toolGuidelines: { ...(o.toolGuidelines ?? {}) },
 		promptGuidelines: [...(o.promptGuidelines ?? [])],
-		skillsPrompt: reader && skills.length
-			? formatSkillsForPrompt(skills as any, reader as any).trim() : "",
-		skills: skills.map((s: any) => ({ name: s.name, description: s.description, path: s.filePath })),
-		contextFiles: (o.contextFiles ?? []).map((f) => ({ path: f.path, content: f.content })),
+		skills: refs(skills),
+		// 门控砍掉技能后清单必须由剩下的技能重渲染，所以注入 pi 的 formatter，而不是预先渲染好的字符串。
+		// reader 措辞取**生效**的工具集（core 把 front-matter 收窄后的 names 传回来）：人设写了
+		// `tools: []` 或 `tools: [bash]` 还点名 read，就是模型看得见却没得用的指令。
+		renderSkills: (kept, names) => {
+			const eff = names ?? toolNames;
+			const vis = eff.filter((n) => !hidden.includes(n));
+			const r = vis.includes("read") ? "read"
+				: vis.includes("bash") ? "bash"
+				: eff.some((n) => n === "read" || n === "bash") ? "indirect" : undefined;
+			const pick = new Set(kept.map((k) => k.path ?? k.name));
+			const list = skills.filter((s) => pick.has(s.filePath) || pick.has(s.name));
+			return r && list.length ? formatSkillsForPrompt(list as any, r as any).trim() : "";
+		},
+		contextFiles: (o.contextFiles ?? []).map((f) => ({ path: f.path, content: f.content, layer: agentLayer(f.path, cwd, agentDir) })),
 		appendSystemPrompt: o.appendSystemPrompt ?? "",
+		appendLayers: layers,
+		foreignSections: Object.keys(o.sections ?? {}),
 		customPrompt: o.customPrompt ?? "",
 		docsPaths: { readme: getReadmePath(), docs: getDocsPath(), examples: getExamplesPath() },
 	};
@@ -127,7 +205,17 @@ function facts(o: BuildSystemPromptOptions, toolNames: string[]): PromptFacts {
  * tools/rules/docs 不在 options.sections 里，它在 buildSystemPromptSections 内部生成）。
  */
 function apply(o: BuildSystemPromptOptions, d: PersonaDecision, reuse = false): void {
-	if (!reuse && d.selectedTools?.length) o.selectedTools = d.selectedTools;
+	// 空数组也是一种决定（`extensions:` 砍到没工具），不能当"没写"跳过。
+	if (!reuse && d.selectedTools) o.selectedTools = d.selectedTools;
+	// `context:` 的门控：两种模式都要执行——它管的是别的扩展/别的层塞进来的东西，不是人设正文。
+	// 回退时不复用旧决策的门控（同 selectedTools：那是另一轮的对象集，写回去会砍掉本轮新出现的贡献）。
+	if (!reuse && d.filter) {
+		const f = d.filter;
+		if (o.sections) for (const tag of f.dropSections) delete o.sections[tag];
+		if (f.skills) o.skills = (o.skills ?? []).filter((s) => f.skills!.includes(s.name));
+		if (f.agents) o.contextFiles = (o.contextFiles ?? []).filter((cf) => f.agents!.includes(cf.path));
+		if (!f.append) o.appendSystemPrompt = "";
+	}
 	if (d.mode === "bare") {
 		o.forceSystemPrompt = d.forceSystemPrompt;
 	} else {
@@ -174,6 +262,8 @@ export default function persona(pi: ExtensionAPI) {
 	let lastRunMode: Mode = "sections";
 	/** provider 侧的 system 原文（`before_provider_request` 的 payload 里抽的）。 */
 	let lastProvider: ProviderSystem | undefined;
+	/** 上一次 run 生效的门控（`extensions:` / `context:`），只为复述用：status 和 prompt-notes。 */
+	let lastGates: PersonaDecision["gates"];
 	/** 同一个 payload 里的工具定义，原封不动（不做摘要）。 */
 	let lastTools: ProviderTools | undefined;
 	/** 该捕获是否来自 agent run；pi 的 compaction / 摘要请求走同一个 hook。 */
@@ -228,6 +318,7 @@ export default function persona(pi: ExtensionAPI) {
 			// 快照是会话级的：不清就会把上一个会话的 prompt 当成本会话的导出。
 			lastRun = undefined;
 			lastRunMode = "sections";
+			lastGates = undefined;
 			lastProvider = undefined;
 			lastTools = undefined;
 			providerFromRun = false;
@@ -243,15 +334,23 @@ export default function persona(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", (event, ctx) => {
 		const o = event.systemPromptOptions;
+		const cwd = ctx.sessionManager.getCwd();
+		const attrib = new Map(pi.getAllTools().map((t) => [t.name, {
+			path: t.sourceInfo?.path ?? t.name,
+			source: t.sourceInfo?.source ?? "unknown",
+			scope: t.sourceInfo?.scope ?? "unknown",
+		}]));
+		const layers = discoverAppendLayers(cwd, ctx.isProjectTrusted());
+		const snapshot = () => facts(o, pi.getActiveTools(), attrib, layers, cwd);
 		try {
-			lastCapture = { facts: facts(o, pi.getActiveTools()), piPromptText: event.systemPrompt ?? "" };
+			lastCapture = { facts: snapshot(), piPromptText: event.systemPrompt ?? "" };
 		} catch { /* 采集失败不影响主流程 */ }
 
 		if (!current || isOff(current)) {
 			lastRunMode = "sections";             // 没人设：pi 自己的结构化段
+			lastGates = undefined;
 			return;
 		}
-		const cwd = ctx.sessionManager.getCwd();
 		let meta: PersonaMeta = {};
 		try {
 			const raw = readSafe(cwd, current);
@@ -260,7 +359,7 @@ export default function persona(pi: ExtensionAPI) {
 			const d = decidePersona({
 				name: current,
 				raw,
-				facts: facts(o, pi.getActiveTools()),
+				facts: snapshot(),
 				piPromptText: event.systemPrompt,
 				lastRendered,
 				readTemplate: (n) => readSafe(cwd, n),
@@ -269,6 +368,7 @@ export default function persona(pi: ExtensionAPI) {
 			lastGood = d;
 			lastRendered = d.customPrompt ?? d.forceSystemPrompt;
 			lastRunMode = d.mode;
+			lastGates = d.gates;
 			lastError = undefined;
 			warn(ctx, d.warnings);
 		} catch (e) {
@@ -277,12 +377,14 @@ export default function persona(pi: ExtensionAPI) {
 			const policy = resolveOnError(meta);
 			if (policy === "last" && lastGood?.persona === current) {
 				try {
-					apply(o, lastGood, true);           // 只复用 prompt/sections，工具集取实时
+					apply(o, lastGood, true);           // 只复用 prompt/sections，工具集与门控取实时
 					lastRunMode = lastGood.mode;
+					lastGates = undefined;
 					ctx.ui.notify(`persona '${current}' failed: ${message} — reusing last good prompt`, "error");
 				} catch { /* 保底：什么都不改 */ }
 			} else {
 				lastRunMode = "sections";             // 回退到 pi 自己的结构化段
+				lastGates = undefined;
 				ctx.ui.notify(`persona '${current}' failed: ${message} — using pi native prompt`, "error");
 			}
 		}
@@ -356,6 +458,7 @@ export default function persona(pi: ExtensionAPI) {
 						`mode: ${meta ? resolveMode(meta) : "(persona unreadable)"}`,
 						`on_error: ${meta ? resolveOnError(meta) : "-"}`,
 						`cache: ${lastGood ? `${lastGood.persona} (${lastGood.mode})` : "(empty)"}`,
+						gateLine(meta, lastGates),
 						`last error: ${lastError ? `${lastError.at} ${lastError.persona}: ${lastError.message}` : "(none)"}`,
 					].join("\n"), "info");
 					return;
@@ -401,6 +504,7 @@ export default function persona(pi: ExtensionAPI) {
 						toolsCapture: lastTools?.tools?.length
 							? lastTools
 							: { note: "not written: no payload captured in this session" },
+						gates: lastGates,
 					}), "utf8");
 					written.push("prompt-notes.txt");
 					// 切了人设但没跑：快照还是上一个 run 的。notify 里说清它来自哪。

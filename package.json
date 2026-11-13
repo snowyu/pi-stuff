@@ -22,6 +22,7 @@
     "@earendil-works/pi-coding-agent": "1.5.2",
     "@marcfargas/pi-test-harness": "^0.6.1",
     "@types/node": "^26.6.6",
+    "@types/picomatch": "^4.0.3",
     "pi-coding-agent-test": "^0.1.4",
     "typescript": "^7.0.2"
   },
@@ -29,6 +30,7 @@
     "node": ">=22.18"
   },
   "dependencies": {
-    "@isdk/template-engines": "^0.6.12"
+    "@isdk/template-engines": "^0.6.12",
+    "picomatch": "^4.0.7"
   }
 }

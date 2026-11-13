@@ -27,6 +27,10 @@ export interface PromptCapture {
 	prompt: string;
 	/** Tools declared to the model at that moment; pi finalizes the loadout after the handlers. */
 	activeTools: string[];
+	/** `systemPromptOptions.selectedTools` after every handler ran — what an extension asked for. */
+	selectedTools?: string[];
+	/** Custom section tags present after every handler ran (gated-away ones must be gone). */
+	sections?: string[];
 }
 
 function captures(): PromptCapture[] {
@@ -43,6 +47,8 @@ export default function (pi: ExtensionAPI) {
 			customPrompt: event.systemPromptOptions.customPrompt,
 			prompt: event.systemPrompt,
 			activeTools: pi.getActiveTools(),
+			selectedTools: [...(event.systemPromptOptions.selectedTools ?? [])],
+			sections: Object.keys(event.systemPromptOptions.sections ?? {}),
 		});
 	});
 }

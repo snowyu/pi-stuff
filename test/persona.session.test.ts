@@ -23,11 +23,13 @@ import { join } from "node:path";
 import { after, beforeEach, describe, test } from "node:test";
 import type { ExtensionRunner } from "@earendil-works/pi-coding-agent";
 
+import { CONTRIB_APPEND, CONTRIB_SECTION, PROBE_TOOL } from "./fixtures/contributor.ts";
 import { CAPTURES_KEY, type PromptCapture } from "./fixtures/prompt-capture.ts";
 
 const PERSONA = new URL("../extensions/persona/index.ts", import.meta.url).pathname;
 const CAPTURE = new URL("./fixtures/prompt-capture.ts", import.meta.url).pathname;
 const LOADOUT = new URL("./fixtures/tool-loadout.ts", import.meta.url).pathname;
+const CONTRIB = new URL("./fixtures/contributor.ts", import.meta.url).pathname;
 
 /** Sections-mode persona: pi wraps the default sections, the body is only the preamble. */
 const PIRATE = "You are a pirate coding matey. End every reply with \"Arrr!\"\n";
@@ -665,7 +667,108 @@ describe("persona in a real pi session", () => {
 			session.dispose();
 		}
 	});
-});
+
+	describe("gates: extensions: (whose tools) and context: (what others appended)", () => {
+		// 基线：同一个贡献者、同一个扩展顺位，只是人设没写门控——不然"少了东西"证不了是门控干的。
+		test("with no gate, another extension's tool, addendum line and section all reach the prompt", async () => {
+			tempAgentDir({ plain: "Matey.\n{{ tools }}\n" });
+			const session = await createTestSession({ extensions: [CONTRIB, PERSONA, CAPTURE] });
+			try {
+				await runCommand(session, "persona", "plain");
+				await session.run(when("hi", [says("ahoy")]));
+				assert.match(captures()[0].prompt, /- probe_tool: probe the fixture/);
+				assert.match(captures()[0].prompt, /<contrib_notes>/);
+				assert.match(captures()[0].prompt, /contributed by the fixture/);
+			} finally {
+				session.dispose();
+			}
+		});
+
+		test("extensions: [\"builtin\"] drops the tool another extension registered", async () => {
+			tempAgentDir({ builtinonly: '---\nextensions: ["builtin"]\n---\nMatey.\n{{ tools }}\n' });
+			const session = await createTestSession({ extensions: [CONTRIB, PERSONA, CAPTURE] });
+			try {
+				await runCommand(session, "persona", "builtinonly");
+				await session.run(when("hi", [says("ahoy")]));
+				assert.ok(!(captures()[0].selectedTools ?? []).includes(PROBE_TOOL), "the request must lose that tool too, not just the list");
+				assert.match(captures()[0].prompt, /- read: /, "pi's own tools stay");
+				assert.doesNotMatch(captures()[0].prompt, /probe_tool/);
+				assert.deepEqual(notes(session).filter((n) => n.startsWith("persona:")), [], "an exact gate must not warn");
+			} finally {
+				session.dispose();
+			}
+		});
+
+		test("the gate is attributed by pi's SourceInfo: the fixture matches its path, not `builtin`", async () => {
+			tempAgentDir({ bypath: '---\nextensions: ["**/fixtures/*"]\n---\nMatey.\n{{ tools }}\n' });
+			const session = await createTestSession({ extensions: [CONTRIB, PERSONA, CAPTURE] });
+			try {
+				await runCommand(session, "persona", "bypath");
+				await session.run(when("hi", [says("ahoy")]));
+				assert.ok((captures()[0].selectedTools ?? []).includes(PROBE_TOOL), "a path glob reaches the loaded extension");
+				assert.ok(!(captures()[0].selectedTools ?? []).includes("read"), "and pi's built-ins are out");
+			} finally {
+				session.dispose();
+			}
+		});
+
+		test("context: removes another extension's section and its appended addendum line", async () => {
+			tempAgentDir({ quiet: '---\ncontext: ["*", "!section:contrib_notes", "!append:*"]\n---\nMatey.\n' });
+			const session = await createTestSession({ extensions: [CONTRIB, PERSONA, CAPTURE] });
+			try {
+				await runCommand(session, "persona", "quiet");
+				await session.run(when("hi", [says("ahoy")]));
+				assert.doesNotMatch(captures()[0].prompt, /<contrib_notes>/);
+				assert.doesNotMatch(captures()[0].prompt, /contributed by the fixture/);
+				assert.ok(!(captures()[0].sections ?? []).includes(CONTRIB_SECTION), "the section must be gone from the options, not just unwrapped");
+				assert.deepEqual(notes(session).filter((n) => n.startsWith("persona:")), [], "no pattern may be reported as unused here");
+			} finally {
+				session.dispose();
+			}
+		});
+
+		test("tools: [] 在真会话里就是真全关：请求里没有工具声明", async () => {
+			tempAgentDir({ notools: '---\ntools: []\n---\nMatey.\n{{ tools }}\n' });
+			const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+			try {
+				await runCommand(session, "persona", "notools");
+				await session.run(when("hi", [says("ahoy")]));
+				assert.deepEqual(captures()[0].selectedTools, []);
+				assert.doesNotMatch(captures()[0].prompt, /- read: |probe_tool/);
+				assert.match(captures()[0].prompt, /\(none\)/, "没工具就是 pi 的 (none)，段本身不会消失");
+			} finally {
+				session.dispose();
+			}
+		});
+
+		test("/persona status 在第一次 run 之前就报出 front-matter 里的门控，并标出没应用", async () => {
+			tempAgentDir({ builtinonly: '---\nextensions: ["builtin"]\n---\nMatey.\n' });
+			const session = await createTestSession({ extensions: [CONTRIB, PERSONA, CAPTURE] });
+			try {
+				await runCommand(session, "persona", "builtinonly");
+				await runCommand(session, "persona", "status");
+				assert.match(lastNote(session), /gates: extensions=\["builtin"\] context=\* \(front-matter; no run has applied them yet\)/);
+				await session.run(when("hi", [says("ahoy")]));
+				await runCommand(session, "persona", "status");
+				assert.match(lastNote(session), /^gates: extensions=\["builtin"\] context=\*$/m);
+			} finally {
+				session.dispose();
+			}
+		});
+
+		test("/persona status repeats the gate that is in force", async () => {
+			tempAgentDir({ builtinonly: '---\nextensions: ["builtin"]\n---\nMatey.\n' });
+			const session = await createTestSession({ extensions: [CONTRIB, PERSONA, CAPTURE] });
+			try {
+				await runCommand(session, "persona", "builtinonly");
+				await session.run(when("hi", [says("ahoy")]));
+				await runCommand(session, "persona", "status");
+				assert.match(lastNote(session), /gates: extensions=\["builtin"\] context=\*/);
+			} finally {
+				session.dispose();
+			}
+		});
+	});
 
 	test("when no provider request happened, the notes say so and nothing is invented", async () => {
 		const agentDir = tempAgentDir({ pirate: PIRATE });
@@ -680,3 +783,4 @@ describe("persona in a real pi session", () => {
 			session.dispose();
 		}
 	});
+});
