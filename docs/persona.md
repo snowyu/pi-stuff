@@ -34,6 +34,7 @@
     - [sections 的合并语义](#sections-的合并语义)
   - [模板变量](#模板变量)
   - [front-matter](#front-matter)
+    - [门控：extensions: 与 context:](#门控extensions-与-context)
   - [include](#include)
   - [搜索路径与优先级](#搜索路径与优先级)
   - [命名规则](#命名规则)
@@ -58,7 +59,7 @@ cd pi-stuff && npm install
 { "packages": ["/absolute/path/to/pi-stuff"] }
 ```
 
-local package 的相对路径从**声明它的 settings.json 所在目录**解析（即 `~/.pi/agent/`），不是你的项目目录，所以写绝对路径最稳。local package pi 不会自动装依赖，`npm install` 要自己跑。
+local package 的相对路径从**声明它的 settings.json 所在目录**解析（即 `~/.pi/agent/`），不是你的项目目录，所以写绝对路径最稳。local package pi 不会自动装依赖，`npm install` 要自己跑——`persona` 的 `extensions:` / `context:` 门控用 `picomatch`（已写在 `dependencies` 里），没装扩展就加载失败并明确报错，不会静默变成"门控不过滤"。
 
 项目级安装用 `pi install ./pi-stuff --local`（写入 `.pi/settings.json`，需项目 trust）。
 
@@ -152,10 +153,11 @@ preamble → [tools → rules → docs] → addendum → project_context → ski
 ### addendum
 
 - **内容**：全局/项目补充指令，即你的"补充军令"。
-- **来源**：`--append-system-prompt`（可重复）；**只要 CLI 传了该 flag，`APPEND_SYSTEM.md` 就完全不读**。否则读 `.pi/APPEND_SYSTEM.md`（需 trust）> `~/.pi/agent/APPEND_SYSTEM.md`，同名不合并。
-- **变量**：`{{ append_system }}`。
+- **来源**：`--append-system-prompt`（可重复）；**只要 CLI 传了该 flag，`APPEND_SYSTEM.md` 就完全不读**。否则只读**一层**：`.pi/APPEND_SYSTEM.md`（需 trust）命中就跳过 `~/.pi/agent/APPEND_SYSTEM.md`——不是两层叠加（`discoverAppendSystemPromptFile()`，pi 1.5.2）。
+- **变量**：`{{ append_system }}`（pi 本轮真正追加的那一串）、`{{ append_project }}` / `{{ append_global }}`（两层 `APPEND_SYSTEM.md` 各自的内容，本扩展按 pi 的规则重新发现）。
 - **默认注入**：是。
 - **注意**：这是 pirate 明明没写占位符却还知道"回复用中文 / Conventional Commits / TDD"的原因。
+- **注意（两层只有一个窗口）**：项目层命中时 pi 不送全局层，`{{ append_system }}` 里就只有项目层——"我的全局规则去哪了"是真会发生的事故。要两层都要，写 `{{ append_project }}` + `{{ append_global }}`（被 trust / `--append-system-prompt` 挡住的那层会是空串，不会凭空造），或用 `context:` 门控（见下）。
 
 ### project_context
 
@@ -163,15 +165,15 @@ preamble → [tools → rules → docs] → addendum → project_context → ski
 - **来源**：`AGENTS.md` / `CLAUDE.md`（含 `AGENTS.override.md`），从 agent 目录、cwd 及**所有父目录**发现；`AGENTS.override.md` 只替换同目录的 AGENTS.md/CLAUDE.md。**上下文文件发现不需要 project trust**，`-nc` 可关闭。
 - **变量**：`{{ project_context }}`（渲染好的整块）、`{{ agents }}`（`[{path, content}]`，想自己排版用它）。
 - **默认注入**：是。
-- **注意**：不注入就等于项目规则失效。
+- **注意**：不注入就等于项目规则失效。要按层 / 按路径筛，用 `context:`（`agents:project`、`agents:global`、`agents:ancestor`、`!**/vendor/**`），见[门控](#门控extensions-与-context)。
 
 ### skills
 
 - **内容**：技能清单（名称/描述/路径）。技能全文是模型按需用 read 读的，所以清单是入口。
-- **来源**：已发现技能，且 `read` 或 `bash` 可用（都被隐藏但 indirect 可达时措辞会点名不具工具）。
+- **来源**：已发现技能，且 `read` 或 `bash` 可用（都被隐藏但 indirect 可达时措辞会点名不具工具）。措辞取的是**生效**的工具集——front-matter `tools:` / `extensions:` 收窄后就不点名没声明的工具（`tools: []` 时清单还在，但不说"用 read 读"）。
 - **变量**：`{{ skills_prompt }}`（pi 原生渲染，`formatSkillsForPrompt`）、`{{ skills }}`（`[{name, description, path}]`）。
 - **默认注入**：是。
-- **注意**：不注入等于对模型隐藏所有技能。
+- **注意**：不注入等于对模型隐藏所有技能。按来源筛用 `context:`（`skill:local:user`、`skill:builtin`、`!skill:pdf`）；被筛掉后 `{{ skills_prompt }}` 是用剩下的重渲染的。
 
 ### cwd
 
@@ -213,7 +215,9 @@ preamble → [tools → rules → docs] → addendum → project_context → ski
 | `pi_docs` | string | **严格抽取**：抽不到就保留字面量 `{{ pi_docs }}` 并告警，让问题可见 |
 | `project_context` | string | project_context 段正文 |
 | `skills_prompt` | string | skills 段正文 |
-| `append_system` | string | APPEND_SYSTEM.md / `--append-system-prompt` |
+| `append_system` | string | APPEND_SYSTEM.md / `--append-system-prompt`：pi 本轮真正追加的那一串 |
+| `append_project` | string | 项目层 `.pi/APPEND_SYSTEM.md` 的内容（未 trust / 被 CLI flag 取代时为空串） |
+| `append_global` | string | 全局层 `~/.pi/agent/APPEND_SYSTEM.md` 的内容（同上） |
 | `system_md` | string | SYSTEM.md / `--system-prompt`（pi 解析结果） |
 | `tool_names` | string[] | 已声明工具名 |
 | `tool_snippets` | object | `{工具名: 一句话描述}` |
@@ -229,7 +233,9 @@ preamble → [tools → rules → docs] → addendum → project_context → ski
 ---
 mode: sections        # sections（默认）| bare（旧名 force）
 on_error: last        # last（默认）| native —— 渲染失败时怎么办，见「渲染失败时会发生什么」
-tools: [read, bash]   # 可选，本人设的工具集
+tools: [read, bash]   # 可选，本人设的工具集；[] = 不声明任何工具，"*" = 全部
+extensions: ["builtin", "git:github.com/snowyu/*"]   # 可选，允许谁的工具有进来（见下）
+context: ["*", "!**/vendor/**", "!append:global"]     # 可选，允许谁追加的提示词进来（见下）
 sections:             # 可选，见合并语义
   rules: "{{ rules }}\n- 额外规则"
   docs: null
@@ -237,9 +243,58 @@ description: 一句话说明，切换时显示
 ---
 ```
 
-`mode` / `on_error` 写错值（`mode: section`、`on_error: abort`）会**报错并 notify**，不会静默当成默认值。front-matter 用的是 core 自带的 YAML 子集（标量 / 引号转义 / 流程数组 / 块数组 / 嵌套映射 / 块标量 `|` `>`）；锚点、流式映射、多文档这类 YAML 特性会明确报错。详见 [core.ts](../extensions/persona/core.ts) 的注释。
+`mode` / `on_error` 写错值（`mode: section`、`on_error: abort`）会**报错并 notify**，不会静默当成默认值。front-matter 只认上面这七个名字：写 `deny:` / `allow:` 或 `toold:` 这类陌生键也会**报错**（`deny:` 的报错直接告诉你用 `!`），不会"没看见"——一个静默失效的排除列表比没有排除列表更坑。front-matter 用的是 core 自带的 YAML 子集（标量 / 引号转义 / 流程数组 / 块数组 / 嵌套映射 / 块标量 `|` `>`）；锚点、流式映射、多文档这类 YAML 特性会明确报错。详见 [core.ts](../extensions/persona/core.ts) 的注释。
 
-`tools:` 通过 `systemPromptOptions.selectedTools` 生效，**同时**改 prompt  contributions 和真实 `tools` 字段。它是每个 run 强制覆盖，会跟 `tool_search` / codemode 的动态加载打架——用动态工具的人设别写它。渲染失败走 `on_error: last` 回退时**不会**把旧决策的 `tools:` 写回去，工具集永远取实时值。
+`tools:` 通过 `systemPromptOptions.selectedTools` 生效，**同时**改 prompt  contributions 和真实 `tools` 字段。三种写法分得很清，与 `extensions:` / `context:` 是同一套：
+
+| 写法 | 含义 |
+|---|---|
+| 省略（`tools:` 后面空着也算） | 不干预：用实时 loadout |
+| `tools: "*"` | 全部：同上——不写 `selectedTools`，而不是声明一个叫 `*` 的工具 |
+| `tools: [read, bash]` | 只要这几个；列表顺序就是 `<tools>` 里的顺序 |
+| `tools: []` | **显式全关**：一个工具都不声明，`<tools>` 里是 pi 自己的 `(none)`（段不会默默消失） |
+
+`tools:` 与 `extensions:` 同时在场是**交集**，`extensions:` 是天花板（详见[门控](#门控extensions-与-context)）。`tools:` 是每个 run 强制覆盖，会跟 `tool_search` / codemode 的动态加载打架——用动态工具的人设别写它。渲染失败走 `on_error: last` 回退时**不会**把旧决策的 `tools:` 写回去，工具集永远取实时值。
+
+### 门控：`extensions:` 与 `context:`
+
+`tools:` 挑的是**工具名**，回答不了另外两个问题：这次允许**谁**注册的工具（"不要用未审计的包带来的工具"），以及**别人追加的提示词**要不要进 prompt（"那个扩展往 system 里插的话我不想让模型看到"）。这两个字段挑的是**来源**：
+
+| 字段 | 门的是什么 | pattern 拿来匹配的候选键 |
+|---|---|---|
+| `extensions:` | 工具声明。`selectedTools` 只留下来源命中的工具，**同时**改 prompt 里的 `<tools>`（两者取同一个 `match()`，不会漂） | pi 的 `SourceInfo`：`source`、`<source>:<scope>`、`path`。可用：`builtin`、`cli`、`local:user`、`local:project`、`git:github.com/you/pkg`、`git:github.com/you/*`、`**/extensions/ssh*` |
+| `context:` | 往 prompt 里追加的东西：上下文文件（AGENTS.md）、技能清单、其它扩展注入的自定义段、`APPEND_SYSTEM.md` 两层 | 带 kind 前缀：`agents:<path>`、`agents:project`、`agents:global`、`agents:ancestor`（cwd 父目录里发现的）；`skill:<source>`、`skill:<source>:<scope>`、`skill:<name>`、`<技能路径>`；`section:<tag>`（或裸 `<tag>`）；`append:pi`、`append:project`、`append:global`、`append:other`、`append:empty` |
+
+```yaml
+extensions: ["builtin", "git:github.com/snowyu/*", "!git:github.com/snowyu/unaudited"]
+context: ["*", "!**/vendor/**", "!append:global", "!section:proxy_guard"]
+```
+
+只有这两个字段，**没有 `deny:`**：否定写在同一个列表里，`!` 开头。规则：
+
+- **deny 永远赢**。命中 `!x` 就直接排除，哪怕也命中了正项。
+- 列表里有正项 → **白名单**，没命中的出局；列表**全是** `!x` → "其余都要"。
+- `extensions: "*"` / `context: "*"`（或省略）= 不过滤，就是默认行为；`tools:` 也一样，省略与 `"*"` 都是"跟实时 loadout"。YAML 里 `*` **必须加引号**（裸 `*` 是 alias，front-matter 会明确报错）。
+- `"*"` 按"全部"处理，不是 glob 的单层匹配——包来源里带 `/`，真 glob 会漏。要单层就写 `"git:github.com/snowyu/*"`。
+- **没命中过的 pattern 会 notify 告警**（`extensions: pattern matched nothing: "…"`，每个 run 都会重提）。打错一个字母的包名不会静默变成"什么都没过滤"。
+- `[]`（或只写了空串）是**显式全关**，并告警；不是你忘写了。相反，`"*"` 才是"不过滤"。`tools:` 用同一套三态，只是 `tools: []` 不告警——不声明工具就是人设的本意。
+- **`!` 项要加引号**：`"!append:global"`。块数组里裸写 `- !append:global` 在 YAML 里是 tag不是字符串，front-matter 会明确报错（`bare ! is a YAML tag: quote it as "!append:global"`），不会当成否定：
+
+  ```yaml
+  context:
+    - "*"
+    - "!append:global"
+    - "!**/vendor/**"
+  ```
+- `"!"` 后面什么都没有（`"!"`、`"!  "`）会报错，不会被当成"deny 一切"。
+- 工具名字在 `getAllTools()` 里找不到来源时（少见：`selectedTools` 里有一个未注册的名字）按 `source: "unknown"` 处理并告警，不静默归类到 `builtin`。
+- 两种模式都生效：门控改的是 `systemPromptOptions`（`selectedTools` / `contextFiles` / `skills` / `appendSystemPrompt` / `sections`），不是模板文本。
+- `context:` 砍技能时，`{{ skills_prompt }}` 是**用活下来的技能重渲染**的，不是在 pi 的文本上做字符串删除。
+- `context:` 只管**其它扩展**注入的段；人设自己在 `sections:` 里写的段不受影响（同名合并语义见[上](#sections-的合并语义)）。
+- `extensions:` 与 `tools:` 会**取交集**：`tools:` 里点名了一个被来源门控掉的工具，它不会回来，并且会 notify 说破了是哪几个。
+- glob 引擎是 `picomatch`（`dot: true`；win32 下 `windows` + `nocase`）。**`!` 的语义是本扩展实现的**：picomatch v4 把模式数组当 OR，`["builtin", "!local:project"]` 会被 `!…` 抢短路（见「设计决策」）。
+
+排查：`/persona status` 会打一行 `gates: extensions=["builtin"] context=*`。刚切好人设还没跑过也会打（多一个 `(front-matter; no run has applied them yet)` 后缀）——门控在 run 的 `before_agent_start` 里才生效，所以这两种状态得分开说。`/persona prompt` 的 `prompt-notes.txt` 里也有同样一行（只有真跑过才有）。
 
 ## include
 
@@ -306,7 +361,7 @@ jinja 引擎（`@isdk/template-engines` 的 `HFTemplate`）**没有语句级 `{%
 | `/persona off` | 交还 pi 原生 |
 | `/persona dirs` | 打印搜索路径 |
 | `/persona prompt` | 导出到 `~/.pi/agent/personas/`，**逐字内容与注释分文件**：`system-prompt.txt`（pi 为那次 run 渲染的 system 文本）、`system-prompt-as-sent.txt` + `tools-as-sent.json`（provider 收到的原文，只在真捕获到 payload 时写）、`prompt-notes.txt`（来源 / 回退 / 工具摘要，全是注释）。本会话还没跑过 run 时拒绝导出，`/new` 后快照失效 |
-| `/persona status` | 当前人设及来源（flag / env / 会话条目 / 文件）、mode、`on_error`、缓存、最近一次错误原文与时间 |
+| `/persona status` | 当前人设及来源（flag / env / 会话条目 / 文件）、mode、`on_error`、**生效的 `gates:`（`extensions=[…] context=*`）**、缓存、最近一次错误原文与时间 |
 | `/persona golden` | 在**当前会话**里录一份 `<tools>`/`<rules>` 基线到 `test/fixtures/pi-sections.json`（升级 pi 后校准用） |
 
 **为什么不是 `/new <人设>`**：`/new` 是内置命令且不接受参数（`BUILTIN_SLASH_COMMANDS` 里没有 `argumentHint`），扩展注册同名命令会触发 pi 的冲突告警并在自动补全里被跳过。所以用 `/persona <name> new`。
@@ -357,7 +412,7 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
    | `system-prompt.txt` | pi 为那次 run 渲染的 system 文本，逐字 | 总是 |
    | `system-prompt-as-sent.txt` | provider 收到的 system 文本，逐字 | 真捕获到 payload 时 |
    | `tools-as-sent.json` | provider 收到的工具定义，payload 里长什么样就写什么样 | 真捕获到 payload 时 |
-   | `prompt-notes.txt` | 注释：哪个 run / 人设 / 模式、是否回退、工具参数摘要、被切掉的工具、捕获从哪来 | 总是 |
+   | `prompt-notes.txt` | 注释：哪个 run / 人设 / 模式、是否回退、**生效的门控（`gates:` 一行）**、工具参数摘要、被切掉的工具、捕获从哪来 | 总是 |
 
    没捕获到 payload 就**不写** provider 那两个文件：注册表里的工具定义不是上线的那一份（provider 层还会改名 / 加 `strict` / 换字段名），拿它冒充逐字内容比不写更坏。工具信息至少能在 `prompt-notes.txt` 里看到摘要——bare 模式没有 `<tools>` 段，工具只走声明这条通道，所以别看 `system-prompt.txt` 就下结论。（切了人设但还没跑，快照还是**上一个** run 的——notes 首行会说清。）
 
@@ -372,7 +427,7 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
    `system-prompt-as-sent.txt` 取自第三层，所以它是**唯一**能看到 provider 注入内容（如身份段）的地方。抽不到的 shape 会在 notes 里直说 `unrecognized payload shape (keys: …)`，不猜。
 2. `/persona dirs` → 确认人设文件被扫到。
 3. 看请求 payload：临时加一个 `pi.on("before_provider_request", …)` 打印，或用本地 logging 代理 + `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`。
-4. `/persona status` → 看当前人设、来源、mode/on_error、缓存和**最近一次错误原文**（渲染失败不会静默，但通知会过，status 里能回查）。
+4. `/persona status` → 看当前人设、来源、mode/on_error、**生效的门控列表**、缓存和**最近一次错误原文**（渲染失败不会静默，但通知会过，status 里能回查）。门控本身只写"这次用哪些 pattern"；pattern 有没有命中、`tools:` 被门控掉了哪几个，是每次 run 的 notify，没存处。
 
 **与 pi 的漂移：`<tools>` / `<rules>` 是我们自己拼的，不是抄的。** pi 生成这两段的规则（有 snippet 才列、bash/PowerShell/搜索工具三条规则分支、固定两条）写在 `buildSystemPromptSections()` 里，而那个函数**不在 pi 的公开导出里**，抄一份无法编译期发现漂移。所以拿两层测试钉住：
 
@@ -407,13 +462,16 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
 4. **`{{ tools }}` 对 `hiddenTools` 可能滞后**。工具名取的是 handler 时刻的 `pi.getActiveTools()`（跟 `--tools` / front-matter `tools:` / 其它扩展的收窄同步），但 pi 在**所有 handler 之后**才覆写 `options.hiddenTools`，所以 codemode `only` 模式或 `tool_search` 在同一轮里动态改声明时，人设里的工具清单可能与该次请求的真实声明不一致。这类场景建议不注入 `tools` 段。
 5. **jinja 子集**。无 `include`/`extends`/`import`/`block` 语句（用 `include()` 函数替代）。
 6. **只支持 jinja**。其它引擎（golang / f-string / env）没有扩展函数机制，`include()` 无法实现。
-7. **front-matter 是 YAML 子集**。core 自带一个极小解析器（标量 / 引号转义 / 流程数组 / 块数组 / 嵌套映射 / 块标量 `|` `>`），为的是不依赖未声明的传递依赖。锚点、别名、流式映射、多文档会**明确报错**，不会静默解析成错的值。需要那些写法就把它们放进正文而不是 front-matter。
+7. **front-matter 是 YAML 子集，名字也是闭集**。core 自带一个极小解析器（标量 / 引号转义 / 流程数组 / 块数组 / 嵌套映射 / 块标量 `|` `>`），为的是不依赖未声明的传递依赖。锚点、别名、流式映射、多文档会**明确报错**，不会静默解析成错的值；`mode` `on_error` `tools` `extensions` `context` `sections` `description` 之外的键同样报错。需要那些写法就把它们放进正文而不是 front-matter。
 8. **`last` 回退不跳进程**。缓存是进程内的，重启后首次渲染失败就是 pi 原生 prompt。
 9. **sections 名受 pi 约束**。自定义段名必须匹配 `/^[a-z][a-z0-9_-]*$/`，且 `preamble` 保留；写错会在切换时报错，不是静默丢掉。
-10. **其它扩展的 section 会被保留**。注入默认段时会把 `options.sections` 里已有的同名段交回给那个扩展（merge，不是 overwrite），但**同名段只有一个**——两个扩展都想叫 `rules` 时仍是后者胜出，这是 pi 的数据结构，不是本扩展能修的。
+10. **其它扩展的 section 会被保留**。注入默认段时会把 `options.sections` 里已有的同名段交回给那个扩展（merge，不是 overwrite），但**同名段只有一个**——两个扩展都想叫 `rules` 时仍是后者胜出，这是 pi 的数据结构，不是本扩展能修的。想整段拿掉用 `context: ["*", "!section:<tag>"]`。
 11. **`/persona prompt` 报告的是过去，不是将来**。它导出的是 `turn_end` / `agent_end` 拍的快照。刚切人设还没跑，导出的仍是上一个 run 的 prompt；`/new` 会清掉快照。
 12. **`prompt-notes.txt` 里的参数是摘要，不是 schema 原文**。`parameters: path*: string, tags: string[]` 这种写法是为了可读；嵌套对象只写 `object`，`enum` 列值。逐字的定义在 `tools-as-sent.json`（只在真捕获到 payload 时才有）。notes 里的工具名与描述取的是 `getActiveTools()` / `getAllTools()`，所以第 4 条的 `hiddenTools` 滞后在这里同样适用；`tools-as-sent.json` 取的是 payload，不受这个滞后影响。
 13. **provider 那两个文件不是永远有**。`onPayload` 只有真的 provider serializer 会调（`anthropic-messages.js` 等），脚本化 / 离线 provider 不调，那时两个文件不写，notes 里写 `no provider request seen in this session`。另外同一条 hook 也会被 compaction / 摘要请求命中，所以捕获不在 agent run 窗口内时 notes 会多一行 `caveat: captured outside an agent run`。
+14. **门控是 handler 时刻的快照**。`extensions:` 取的是 `pi.getAllTools()`、`context:` 取的是当时已在 `systemPromptOptions` 里的东西，两者都是**本扩展在 `before_agent_start` 里看到的值**。比它晚加载的扩展，同一轮的注册 / 追加 / 自定义段都看不到（它会排在后面改 options）。扩展顺位见[两种模式](#两种模式)。
+15. **工具能按来源门控，追加的提示词不能**。`ToolInfo` / `SkillInfo` / 上下文文件都带 `sourceInfo`，而 pi 在 loader 里就把各扩展的追加串 `join("\n\n")` 了（`agent-session.js`），到 handler 时只剩 `appendSystemPrompt` 一个字符串。所以 `context:` 对追加文本只能说 `append:pi`（本轮全部）/ `append:project` / `append:global`（两层文件）/ `append:other`（都不是，典型就是某个扩展写的）——要按扩展精确屏蔽，只能靠 `section:`（自定义段是分键的）。另外 `append:project` / `append:other` 是拿 `append_system.includes(层内容)` 判的：两层内容一字不差时会归到 `append:project`。
+16. **`extensions:` 只管 `selectedTools` 这条通道**。`--tools`、`hiddenTools`、`tool_search` / codemode 的动态加载照旧是 pi 的规则（第 4 条），门控不会把它们拉回来。
 
 ## 设计决策
 
@@ -428,6 +486,11 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
 - **为什么 `include()` 而不是 `base` 继承**：组合比继承直观，且能带参数、能走优先级查找。
 - **为什么要一个不带 pi 依赖的 `core.ts`**：`PromptFacts` 是本扩展自己的**窄 DTO**（只挑 `toolSnippets` / `toolGuidelines` / `toolNames` / `customPrompt` / cwd 等真正用得上的字段），不是 `BuildSystemPromptOptions` 的镜像。好处：tier 1 测试不装 pi 也能跑；pi 改签名时只有接线层碎；golden 测试能直接拿录下来的 facts 喂 core。pi 类型的转换全部关在 `index.ts` 的 `facts()` 里。
 - **为什么 core 自带 YAML 子集而不依赖 `yaml`**：`yaml` 当时只是从 pi 依赖里白嫖来的传递依赖，`package.json` 里没有它——哪天 pi 换了依赖就碎。手写一个故意很窄的子集，并且**写不通就报错**（而不是默默解析成错值），比拼一个隐式依赖更可控。
+- **为什么只有 `extensions:` / `context:` 两个字段，没有 `deny:`**：一件事只开一个旋钮：一个列表同时写允许和排除，`!` 开头是否定，语义与 shell / `.gitignore` 一致，也避免了"`allow` 写了、`deny` 没写算不算白名单"这种提问。代价是 `!` 得自己实现：picomatch v4 把模式数组当 **OR**，`["builtin", "!local:project"]` 会因 `!local:…` 对大多数串为真而抢短路，所以 `parseGate()` 先把列表拆成 allow / deny 两组，`compileGate()` **两组都算完再定性**（deny 命中即出局）——只靠 deny 短路的话，被 deny 抢掉的那条正项会被当成"没命中过"，白告一个打错字的警。同时 `"*"` 当"全部"特判（不走 glob），否则带 `/` 的包来源被单层 glob 漏掉。
+- **为什么工具能按来源门控而追加文本只能按层**：`getAllTools()[].sourceInfo` 把每个工具归到注册它的扩展（`source` / `scope` / `path`），这是 pi 已有的事实，本扩展不重新发明。追加的提示词没有这个事实：pi 在 loader 里就 `loaderAppendSystemPrompt.join("\n\n")`，`BuildSystemPromptOptions.appendSystemPrompt` 是一个汇流后的串。要按扩展门控它就得自己记"谁追加了什么"，那是在这里抄一遍 pi 的汇流规则（而汇流顺序会变）。所以只说能确定的 `append:pi/project/global/other`，并把判不准的部分写破（[已知限制 15](#已知限制)）。
+- **为什么门控要重新发现 `APPEND_SYSTEM.md` 两层**：pi 只送**一层**（项目命中就跳过全局），`BuildSystemPromptOptions` 里没副本可拿。而"项目层遮蔽了全局层"是真会咬人的，人设得能显式要两层，所以 `{{ append_project }}` / `{{ append_global }}` 自己按 pi 的规则（项目需 trust、全局在 agentDir）读一遍，被 trust / `--append-system-prompt` 挡住的那层给空串 —— 发现不到就是空，不造假。`append_system` 始终是"pi 本轮真送的那一串"，两者在 `context:` 的键里分得清。
+- **为什么没命中过的 pattern 要告警**：与 front-matter 其余部分同一个姿态（`mode` 写错报错、`{{ pi_docs }}` 保留字面量）。门控是白名单语义，打错的 pattern 等价于"没写"，静默就是安全边界静默失效。`[]` 同理：它不是漏写，得告警 + 说清 `"*"` 才是"不过滤"。
+- **为什么 `tools: []` 是全关而不是"当没写"**：省略与 `"*"` 都等于"跟实时 loadout"，那 `[]` 必须表示另一回事，否则"没写"和"我不要工具"在文件里长得一样。`tools:` 后面空着（YAML 的 null）仍算没写，只认空列表这一种全关写法。全关时 `<tools>` 不消失，里面是 pi 自己的 `(none)`（`system-prompt.js` 在 visibleTools 为空时就写 `(none)`），比静默删段好排查。
 - **为什么没有 `on_error: abort`**：pi 的 `BeforeAgentStartEventResult` 只有 `message` / `systemPrompt`，没有取消语义；handler 抛错也只是 `extension_error`，run 照旧。提供一个做不到的选项比不提供更坑。
 - **为什么 `tools` / `rules` 是结构化渲染而不是抽字符串**：抽字符串在 `SYSTEM.md` / `--system-prompt` 在场时直接没有源（pi 不生成那三段），而 `toolSnippets` / `toolGuidelines` / `getActiveTools()` 这些结构化数据一直都在。代价是抄了 pi 的拼装规则，靠 golden + 活体 drift 测试兜漂移（见「验证与排错」）。
 - **为什么 `docs` 不永远兜底**：`customPrompt` 在场时 pi 本来就没有 `<docs>` 段，无脑填一份文案会凭空造出一个 pi 没有的段。所以只在"pi 本来会生成但抽取失败"时兜底，其余情况给空串，并把严格抽取的版本另存为 `{{ pi_docs }}`。

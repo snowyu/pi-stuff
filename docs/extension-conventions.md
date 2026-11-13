@@ -118,7 +118,9 @@ function agentDir(): string {
   resolves today and breaks the day pi changes it — `persona` used `yaml` that way. Either declare it
   (and accept installing it for every user of the package) or implement the narrow thing you actually
   need, as `core.ts` does for front-matter: a YAML subset, and an explicit error for anything outside it
-  instead of a silently wrong value.
+  instead of a silently wrong value. The split to aim for: front-matter parsing is narrow, so it is hand
+  rolled; glob matching for the `extensions:` / `context:` gates is not, so `picomatch` is declared (with
+  `@types/picomatch` in `devDependencies`).
 - Test-only needs (`typescript`, `@types/node`, harnesses) go in `devDependencies`.
 
 ## 6. Docs required per extension

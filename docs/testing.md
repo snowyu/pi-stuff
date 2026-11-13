@@ -102,7 +102,8 @@ assert.equal(proxySeenByTool(session, "fetch_content"), undefined);   // untouch
 
 The same idea works on the prompt. `test/fixtures/prompt-capture.ts` registers a
 `before_agent_start` handler and records `systemPromptOptions.customPrompt`, the rendered
-`event.systemPrompt` and `pi.getActiveTools()`: pi gives every handler the same mutable options
+`event.systemPrompt`, `pi.getActiveTools()`, and — after every handler has had its turn — the resulting
+`selectedTools` and section tags: pi gives every handler the same mutable options
 object, so a fixture listed **after** the extension under test sees exactly what that extension did.
 Its captures live on a `globalThis` key, because pi loads extensions with its own loader — the test's
 `import` of the fixture is a different module instance and shares nothing with it.
@@ -115,6 +116,15 @@ Two things this fixture exists to make visible, both easy to get wrong:
   `test/fixtures/tool-loadout.ts` narrows the loadout from a handler to pin that one-step lag.
 - the tool loadout lives on the extension API (`pi.getActiveTools()` / `pi.setActiveTools()`), not on
   the `ctx` event handlers get: `setActiveTools` on the command context only.
+
+Gating on **who contributed what** needs the opposite load order. `test/fixtures/contributor.ts`
+registers a tool, appends a line to `appendSystemPrompt` and injects a custom section — the three things
+persona's `extensions:` / `context:` gates exist to decide about — and is listed **before** the extension
+under test, because a later contributor is invisible to the gated extension by construction. A baseline
+test asserts the same fixture's output really does reach the prompt when no gate is set: without it,
+"the gate removed it" is unfalsifiable. Attribution itself is pinned in tier 3
+(`test/real/persona.real.test.ts`): the `sourceInfo` values a fixture gets in the harness are not a
+promise about what a loaded package gets in a real run.
 
 One trap in tier 2: the harness builds its session with `SessionManager.inMemory()`, which reports
 `process.cwd()`, not the `cwd` option. Anything the extension resolves from

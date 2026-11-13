@@ -18,7 +18,7 @@ pi config                                    # toggle individual resources
 | Path | |
 |---|---|
 | [`extensions/proxy-guard.ts`](extensions/proxy-guard.ts) | keep web tools working when the configured proxy is down; switch proxy/direct per run — [docs](docs/proxy-guard.md) |
-| [`extensions/persona/`](extensions/persona) | swap pi's preamble for a persona file; `{{tools}}`/`{{rules}}`/`{{docs}}` are re-assembled from pi's structured facts, not scraped from its text — [docs](docs/persona.md). `index.ts` is the wiring, `core.ts` is a pure core with no pi import |
+| [`extensions/persona/`](extensions/persona) | swap pi's preamble for a persona file; `{{tools}}`/`{{rules}}`/`{{docs}}` are re-assembled from pi's structured facts, not scraped from its text; `extensions:` / `context:` in the front-matter gate which extension's tools and which appended prompt layers may in — [docs](docs/persona.md). `index.ts` is the wiring, `core.ts` is a pure core with no pi import |
 | [`personas/`](personas) | the personas the extension above ships with (`default`, `reviewer`, `pirate`, `pirate-plus`, plus `_*.md` fragments for `include()`); pi ignores this directory, a project's `.pi/personas` overrides it |
 | `skills/` `prompts/` `themes/` | empty for now; pi discovers resources from these directories automatically |
 | [`docs/extension-conventions.md`](docs/extension-conventions.md) | how an extension in this package is written, configured, documented and reviewed |
@@ -79,14 +79,19 @@ npm run typecheck    # tsc --noEmit against pi's own types
   `dependencies`, where a physical copy could duplicate pi's classes at runtime.
 - Everything else an extension imports must be a **declared** dependency. `persona/core.ts` therefore
   parses its own YAML subset instead of importing `yaml`, which was only reachable through pi's own
-  dependency tree — an implicit dependency that breaks the day pi changes it.
+  dependency tree — an implicit dependency that breaks the day pi changes it. Where a library really
+  earns its keep it gets declared: the `extensions:` / `context:` gates use `picomatch` (declared, with
+  `@types/picomatch` in `devDependencies`), because a correct glob matcher is not a narrow thing to write.
 - Pi versions are pinned in three places that have to move together: `devDependencies`, the CI
   workflow, and the `piVersion` inside `test/fixtures/pi-sections.json`. The golden test fails if they
   disagree — see [docs/persona.md](docs/persona.md#验证与排错) and [docs/testing.md](docs/testing.md).
 - `persona` in one line each: `on_error: last | native` decides what a failed render does (there is no
   `abort` — pi's `before_agent_start` cannot cancel a run); `PI_PERSONA` / `PI_PERSONAS_PATH` are
   process-wide and the env beats a remembered session choice; persona names are plain filenames, so
-  `..` `/` `\` `:` and the reserved words `off dirs prompt status golden` are rejected. Details:
+  `..` `/` `\` `:` and the reserved words `off dirs prompt status golden` are rejected; `extensions:` /
+  `context:` are glob gates over pi's `SourceInfo` (tools) and over appended context (AGENTS.md, skills,
+  other extensions' sections, both `APPEND_SYSTEM.md` layers), with `!` for exclusion and no separate
+  `deny:` key. Details:
   [docs/persona.md](docs/persona.md).
 - Runtime state (for example `~/.pi/agent/proxy-guard.json`, `~/.pi/agent/personas/current`,
   and the `/persona prompt` exports under `~/.pi/agent/personas/`: `system-prompt.txt`, `system-prompt-as-sent.txt`, `tools-as-sent.json`, `prompt-notes.txt`) lives outside this repo.
