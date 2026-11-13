@@ -19,7 +19,7 @@ pi config                                    # toggle individual resources
 |---|---|
 | [`extensions/proxy-guard.ts`](extensions/proxy-guard.ts) | keep web tools working when the configured proxy is down; switch proxy/direct per run — [docs](docs/proxy-guard.md) |
 | [`extensions/persona/`](extensions/persona) | swap pi's preamble for a persona file; `{{tools}}`/`{{rules}}`/`{{docs}}` are re-assembled from pi's structured facts, not scraped from its text; `extensions:` / `context:` in the front-matter gate which extension's tools and which appended prompt layers may in — [docs](docs/persona.md). `index.ts` is the wiring, `core.ts` is a pure core with no pi import |
-| [`personas/`](personas) | the personas the extension above ships with (`default`, `reviewer`, `pirate`, `pirate-plus`, plus `_*.md` fragments for `include()`); pi ignores this directory, a project's `.pi/personas` overrides it |
+| [`personas/`](personas) | the personas the extension above ships with (`default`, `reviewer`, `pirate`, `pirate-plus`, `audited` and `quiet` for the source gates, plus `_*.md` fragments for `include()`); pi ignores this directory, a project's `.pi/personas` overrides it |
 | `skills/` `prompts/` `themes/` | empty for now; pi discovers resources from these directories automatically |
 | [`docs/extension-conventions.md`](docs/extension-conventions.md) | how an extension in this package is written, configured, documented and reviewed |
 | [`docs/testing.md`](docs/testing.md) | the three test tiers, isolation rules, test-runner choice |

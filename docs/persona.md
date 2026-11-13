@@ -294,6 +294,13 @@ context: ["*", "!**/vendor/**", "!append:global", "!section:proxy_guard"]
 - `extensions:` 与 `tools:` 会**取交集**：`tools:` 里点名了一个被来源门控掉的工具，它不会回来，并且会 notify 说破了是哪几个。
 - glob 引擎是 `picomatch`（`dot: true`；win32 下 `windows` + `nocase`）。**`!` 的语义是本扩展实现的**：picomatch v4 把模式数组当 OR，`["builtin", "!local:project"]` 会被 `!…` 抢短路（见「设计决策」）。
 
+出厂范例（可直接试）：
+
+- `pi --persona audited` — [`personas/audited.md`](../personas/audited.md)：`extensions: ["builtin", "local:user", "git:github.com/snowyu/pi-stuff", "!local:project"]`。内置工具与用户级扩展留下（同一个包按路径装是 `local:user`、按 git 装是 `git:…`，两种写法都列上），项目本地扩展带来的工具既不进 `<tools>` 也不进请求。
+- `pi --persona quiet` — [`personas/quiet.md`](../personas/quiet.md)：`context: ["*", "!append:other", "!section:*", "!**/vendor/**"]`，别的扩展追加的文本与自定义段、vendor 里的 `AGENTS.md` 都进不来；两层 `APPEND_SYSTEM.md` 反而由人设用 `{{ append_global }}` / `{{ append_project }}` 点名要回。
+
+这两个文件不是文档饰物：tier 1 把它们跑在一份"多来源工具 + 两层 addendum + 别的扩展注入的段 + vendor 上下文文件"的事实上，且**不许产生任何告警**（pattern 打错字就是红的）；`audited` 还在真 pi 进程里验证过另一个扩展注册的工具真的被砍掉。
+
 排查：`/persona status` 会打一行 `gates: extensions=["builtin"] context=*`。刚切好人设还没跑过也会打（多一个 `(front-matter; no run has applied them yet)` 后缀）——门控在 run 的 `before_agent_start` 里才生效，所以这两种状态得分开说。`/persona prompt` 的 `prompt-notes.txt` 里也有同样一行（只有真跑过才有）。
 
 ## include

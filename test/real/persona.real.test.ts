@@ -181,6 +181,14 @@ describe("persona against a real pi process", () => {
 		assert.ok(!prompt.includes("- read:"), "一个工具也不声明");
 	});
 
+	test("the shipped \"audited\" persona really drops a loaded extension's tool in a real run", async () => {
+		// 出厂范例不是文档饰物：contributor 的 tool 由 pi 真加载、真注册，而 `extensions:` 说不要。
+		const { run } = await runPersonaScenario("shipped-audited", { PI_PERSONA: "audited" }, {}, undefined, {}, [CONTRIBUTOR]);
+		const prompt = getSystemPrompt(run);
+		assert.match(prompt, /- read:/, "内置工具留下");
+		assert.ok(!prompt.includes("probe_tool"), "另一个扩展注册的工具既不在 prompt 里，也不在声明里");
+	});
+
 	test("APPEND_SYSTEM.md: pi ships one layer, and {{ append_global }} is how a persona asks for the other", async () => {
 		// Both layers exist. pi loads exactly one (project wins, the agent-dir file is skipped —
 		// resource-loader.js discoverAppendSystemPromptFile), so "my global rules disappeared" is a real

@@ -347,6 +347,35 @@ describe("shipped personas (personas/*.md)", () => {
 		}
 	};
 
+	/**
+	 * 出厂人设跑在一份比 F 更真的事实上：多个来源的工具、两层 APPEND_SYSTEM.md、别的扩展
+	 * 注入的段、vendor 里的 AGENTS.md。门控范例只有在这种事实上才能被证伪——也才会被
+	 * "不能告警"这条钩住：pattern 打错字在 F 里根本看不出来。
+	 */
+	const SHIP_F: PromptFacts = {
+		...F,
+		toolNames: ["read", "bash", "ssh_run", "tickets", "deploy"],
+		toolSnippets: { ...F.toolSnippets, ssh_run: "Run a command over ssh", tickets: "Read the tracker", deploy: "Deploy the app" },
+		tools: [
+			...F.tools,
+			{ name: "ssh_run", source: "git:github.com/snowyu/pi-stuff", scope: "user", path: "/u/.pi/extensions/ssh.ts" },
+			// 同一个包按本地路径安装时 source 是 local/user，不是 git：范例必须两种装法都覆盖。
+			{ name: "tickets", source: "local", scope: "user", path: "/u/.pi/packages/pi-stuff/extensions/tickets.ts" },
+			{ name: "deploy", source: "local", scope: "project", path: "/proj/.pi/extensions/deploy.ts" },
+		],
+		skills: [{ name: "pdf", description: "Read PDFs", path: "/u/.pi/skills/pdf/SKILL.md", source: "local", scope: "user" }],
+		contextFiles: [
+			{ path: "/proj/AGENTS.md", content: "project rules", layer: "project" },
+			{ path: "/proj/vendor/deep/AGENTS.md", content: "vendored rules", layer: "project" },
+		],
+		appendSystemPrompt: "appended by another extension",
+		appendLayers: {
+			global: { path: "/u/.pi/agent/APPEND_SYSTEM.md", content: "global layer rules" },
+			project: { path: "/proj/.pi/APPEND_SYSTEM.md", content: "project layer rules" },
+		},
+		foreignSections: ["proxy_guard"],
+	};
+
 	test("the directory is self-consistent and keeps the promises the docs make", () => {
 		// 故意不枚举人设名字：出厂集合会长，新增人设不该要求改这个文件。这里钉的是契约，不是名单。
 		assert.ok(names.length > 0, "personas/ holds no persona at all");
@@ -368,7 +397,7 @@ describe("shipped personas (personas/*.md)", () => {
 			const d = decidePersona({
 				name: "ship",
 				raw: readFileSync(join(dir, file), "utf8"),
-				facts: F,
+				facts: SHIP_F,
 				piPromptText: "<docs>\npi docs\n</docs>",
 				readTemplate,
 			});
@@ -383,7 +412,7 @@ describe("shipped personas (personas/*.md)", () => {
 			const d = decidePersona({
 				name,
 				raw: readFileSync(join(dir, `${name}.md`), "utf8"),
-				facts: F,
+				facts: SHIP_F,
 				piPromptText: "<preamble>You are a coding assistant running inside pi</preamble>\n<docs>\npi's own docs section\n</docs>",
 				readTemplate,
 			});
@@ -416,6 +445,28 @@ describe("shipped personas (personas/*.md)", () => {
 		assert.match(reviewer.sections!.rules, /Be concise in your responses/, "…instead of replacing them");
 		assert.match(reviewer.customPrompt!, /Always answer in Chinese/, "the body pulls in a tone fragment");
 		assert.match(decide("default").sections!.docs, /pi's own docs section/, "default borrows pi's docs text");
+	});
+
+	test("出厂的门控范例只门它 description 里说的那几件事", () => {
+		const decideShip = (name: string) => decidePersona({
+			name,
+			raw: readFileSync(join(dir, `${name}.md`), "utf8"),
+			facts: SHIP_F,
+			piPromptText: "<docs>\npi's own docs section\n</docs>",
+			readTemplate,
+		});
+		const audited = decideShip("audited");
+		assert.deepEqual(audited.selectedTools, ["read", "bash", "ssh_run", "tickets"], "用户级的包（git 装或路径装）留下，项目本地扩展的工具出局");
+		assert.match(audited.sections!.tools, /- ssh_run:/);
+		assert.ok(!audited.sections!.tools.includes("deploy"), "prompt 里的说明书与请求里的声明取同一个集合");
+
+		const quiet = decideShip("quiet");
+		assert.deepEqual(quiet.filter!.dropSections, ["proxy_guard"], "别的扩展注入的段被挡掉");
+		assert.deepEqual(quiet.filter!.agents, ["/proj/AGENTS.md"], "vendor 里的 AGENTS.md 进不来");
+		assert.ok(!quiet.sections!.project_context.includes("vendored rules"), "正文里也不能漏");
+		assert.match(quiet.sections!.addendum, /global layer rules/, "两层 APPEND_SYSTEM.md 是人设自己点名的：pi 只送一层");
+		assert.match(quiet.sections!.addendum, /project layer rules/);
+		assert.ok(!quiet.sections!.addendum.includes("appended by another extension"), "append:other 挡的是别的扩展/CLI 追加的文本");
 	});
 
 	test("the persona set does not collide with the subcommand words", () => {
