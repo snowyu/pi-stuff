@@ -79,6 +79,7 @@ Rules that make an extension testable and safe:
 | Kind | Where | Notes |
 |---|---|---|
 | Per-user config/state | `<agent dir>/<name>.json` | `<agent dir>` = `PI_CODING_AGENT_DIR`, else `$XDG_CONFIG_HOME/pi`, else `~/.pi/agent`. Resolve it the same way pi itself does, at call time. |
+| Per-project state | `<cwd>/.pi/<plural>/<file>` | For a choice that belongs to the directory, not the user (persona pins do). Project layer is read **before** the per-user layer, and only an explicit argument writes the per-user one — a write that a project layer shadows must say so. Say in the docs that this file is machine state: users should gitignore it, and tests must not let it land in the working tree. |
 | One-shot overrides | `PI_STUFF_<NAME>_*` env vars | `_<MODE>`, `_DISABLE=1`, `_DEBUG=<file>` |
 | Data the extension ships | `<plural>/` next to `extensions/` (for example `personas/`) | pi discovers nothing there, it is yours; find it from `dirname(fileURLToPath(import.meta.url))` and document every search path |
 | Anything else | nowhere | no secrets, no caches, no logs inside the repo |

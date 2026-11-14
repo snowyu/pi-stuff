@@ -97,8 +97,8 @@ export type DecideInput = {
 
 /* ---------------- 名字与 front-matter ---------------- */
 
-/** Subcommand words that cannot be persona names — a `golden.md` would be unreachable. */
-export const RESERVED = ["off", "dirs", "prompt", "status", "golden"] as const;
+/** Subcommand and modifier words that cannot be persona names — a `golden.md` would be unreachable. */
+export const RESERVED = ["off", "dirs", "prompt", "status", "golden", "global"] as const;
 
 export const isReserved = (name: string): boolean => (RESERVED as readonly string[]).includes(name.toLowerCase());
 
@@ -896,13 +896,44 @@ export function decidePersona(input: DecideInput): PersonaDecision {
 
 /* ---------------- 状态优先级（纯） ---------------- */
 
+/** 记在哪个 `personas/current` 里：项目级（默认）还是全局级（`global` 修饰词）。 */
+export type StateScope = "project" | "global";
+
+/**
+ * `/persona` 的参数解析：`new` 与 `global` 是**修饰词**，不当人设名。
+ *
+ * 默认只记录到项目（`<cwd>/.pi/personas/current`）；要写全局得显式写 `global`。
+ * 修饰词位置自由（`/persona pirate global new` 与 `/persona new global pirate` 同义）。
+ * `global` 同时在 `RESERVED` 里：叫这个名字的人设文件无论如何都选不到，说破比静默难寻好。
+ */
+export function parseArgs(tokens: readonly string[]): {
+	name: string | undefined;
+	wantNew: boolean;
+	scope: StateScope;
+} {
+	let wantNew = false;
+	let scope: StateScope = "project";
+	const rest: string[] = [];
+	for (const t of tokens) {
+		const low = t.toLowerCase();
+		if (low === "new") { wantNew = true; continue; }
+		if (low === "global") { scope = "global"; continue; }
+		rest.push(t);
+	}
+	const name = normalizeName(rest[0]);
+	return { name: name || undefined, wantNew, scope };
+}
+
 export function resolveCurrent(sources: {
 	flag?: string;
 	env?: string;
 	sessionEntry?: string;
-	stateFile?: string;
+	/** `<cwd>/.pi/personas/current` —— `/persona <name>` 默认写这里，所以它压过全局。 */
+	projectState?: string;
+	/** `~/.pi/agent/personas/current` —— 只有 `/persona <name> global` 写这里。 */
+	globalState?: string;
 }): string | undefined {
-	for (const s of [sources.flag, sources.env, sources.sessionEntry, sources.stateFile]) {
+	for (const s of [sources.flag, sources.env, sources.sessionEntry, sources.projectState, sources.globalState]) {
 		const v = (s ?? "").trim();
 		if (v) return isOff(v) ? "off" : v;
 	}

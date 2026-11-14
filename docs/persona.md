@@ -75,11 +75,12 @@ pi                           # 沿用上次记住的人设
 
 ```
 /persona                     选择器（Tab 补全）
-/persona reviewer            切换，下一个 run 生效
+/persona reviewer            切换，下一个 run 生效（只记住在这个目录）
 /persona reviewer new        切换 + 开新会话
+/persona reviewer global     切换 + 记到全局（所有目录都认，除非那个目录自己钉过）
 /persona off                 交还 pi 原生 prompt
 /persona default             用出厂复刻人设
-/persona dirs                看搜索路径
+/persona dirs                看搜索路径与两层 current
 /persona prompt              导出最近一次 run 的 system 角色全貌（需先发过一条消息）
 /persona status              当前人设 / mode / on_error / 缓存 / 最近一次错误
 /persona golden              重录 <tools>/<rules> 基线（升级 pi 后跑，见「验证与排错」）
@@ -333,16 +334,19 @@ jinja 引擎（`@isdk/template-engines` 的 `HFTemplate`）**没有语句级 `{%
 
 同名人设：项目覆盖全局，全局覆盖包自带。`include()` 走同一套顺序，所以片段也能被项目覆盖。
 
+状态文件 `current`（不带 `.md`，见[状态与持久化](#状态与持久化)）也住在这些人设目录里，但它不是人设：列表与补全只认 `*.md`。
+
 人设文件由扩展直接用 `fs` 读，**不走 pi 的资源发现，因此不受 project trust 门控**。`cd` 到别人的仓库时，`.pi/personas/` 里的内容会直接进你的 system prompt——不可信项目里别随手切人设。（放在 `.pi/extensions/` 的扩展文件本身仍受 trust 约束。）
 
 ## 命名规则
 
-人设名就是一个不带目录的文件名（`<name>.md`）。**拒绝**：空、`..`、`/`、`\`、`:`、控制字符、首尾点号、超过 64 字符。保留名（大小写不敏感）：`off` `dirs` `prompt` `status` `golden`。中文名可用。
+人设名就是一个不带目录的文件名（`<name>.md`）。**拒绝**：空、`..`、`/`、`\`、`:`、控制字符、首尾点号、超过 64 字符。保留名（大小写不敏感）：`off` `dirs` `prompt` `status` `golden` `global`。中文名可用。
 
 - 输入可以带 `.md`，会自动剥掉（`/persona pirate.md` 等价于 `/persona pirate`）。
 - `include()` 用同一套校验，所以片段也不能越出搜索目录、不能叫保留名。
 - 名字**区分大小写**；macOS / Windows 文件系统不区分。跨平台协作建议统一小写文件名。
 - `_` 开头的文件只在 `include()` 里用得到，不进 `/persona` 选择器与补全。
+- `new` 与 `global` 是命令里的**修饰词**，不会被当名字吃。`global` 已进保留名（叫这名字的文件直接报“reserved”）；`new.md` 仍不保留，但它同样选不到——别用这两个词做文件名。
 
 ## 环境变量
 
@@ -350,9 +354,9 @@ jinja 引擎（`@isdk/template-engines` 的 `HFTemplate`）**没有语句级 `{%
 |---|---|
 | `PI_PERSONA` | 人设名。空串 / 全空白 = 未设置；`off`（大小写不敏感）= 显式关闭 |
 | `PI_PERSONAS_PATH` | `:` 分隔的额外搜索目录，**排在所有目录之前** |
-| `PI_CODING_AGENT_DIR` | pi 自己的 agent 目录（`personas/` 与 `personas/current` 都落在它下面） |
+| `PI_CODING_AGENT_DIR` | pi 自己的 agent 目录（全局 `personas/`、全局 `personas/current` 与 `/persona prompt` 的导出都落在它下面） |
 
-优先级：`--persona` > `PI_PERSONA` > 会话条目 > `personas/current`。
+优先级：`--persona` > `PI_PERSONA` > 会话条目 > 项目 `personas/current` > 全局 `personas/current`。
 
 **注意**：env 压过会话条目，所以在设了 `PI_PERSONA` 的 shell 里 resume 旧会话，会覆盖那个会话原本的人设；env 也会渗进该 shell 里所有 pi 子进程（比如测试启的真 pi 进程）。想临时试一下，用 `PI_PERSONA=x pi` 而不是 `export`。
 
@@ -363,22 +367,26 @@ jinja 引擎（`@isdk/template-engines` 的 `HFTemplate`）**没有语句级 `{%
 | `pi --persona <name>` | 启动时指定，优先级最高 |
 | `pi --persona off` | 本次进程用 pi 原生 prompt |
 | `/persona` | 选择器 |
-| `/persona <name>` | 切换，下一个 run 生效 |
+| `/persona <name>` | 切换，下一个 run 生效；**只记录到当前目录** |
 | `/persona <name> new` | 切换 + 开新会话（内部 `ctx.newSession()`） |
-| `/persona off` | 交还 pi 原生 |
-| `/persona dirs` | 打印搜索路径 |
+| `/persona <name> global` | 切换 + 记录到全局（修饰词位置自由，`global new` 也行） |
+| `/persona off` | 交还 pi 原生（同样默认只记当前目录；`off global` 记全局） |
+| `/persona dirs` | 打印搜索路径，外加两层 `current` 的路径与内容 |
 | `/persona prompt` | 导出到 `~/.pi/agent/personas/`，**逐字内容与注释分文件**：`system-prompt.txt`（pi 为那次 run 渲染的 system 文本）、`system-prompt-as-sent.txt` + `tools-as-sent.json`（provider 收到的原文，只在真捕获到 payload 时写）、`prompt-notes.txt`（来源 / 回退 / 工具摘要，全是注释）。本会话还没跑过 run 时拒绝导出，`/new` 后快照失效 |
-| `/persona status` | 当前人设及来源（flag / env / 会话条目 / 文件）、mode、`on_error`、**生效的 `gates:`（`extensions=[…] context=*`）**、缓存、最近一次错误原文与时间 |
+| `/persona status` | 当前人设及来源（flag / env / 会话条目 / 项目 current / 全局 current）、mode、`on_error`、**生效的 `gates:`（`extensions=[…] context=*`）**、缓存、**`state: project=… global=…`**、最近一次错误原文与时间 |
 | `/persona golden` | 在**当前会话**里录一份 `<tools>`/`<rules>` 基线到 `test/fixtures/pi-sections.json`（升级 pi 后校准用） |
 
 **为什么不是 `/new <人设>`**：`/new` 是内置命令且不接受参数（`BUILTIN_SLASH_COMMANDS` 里没有 `argumentHint`），扩展注册同名命令会触发 pi 的冲突告警并在自动补全里被跳过。所以用 `/persona <name> new`。
 
 ## 状态与持久化
 
-优先级：`--persona` > `PI_PERSONA` > 会话内记录 > `~/.pi/agent/personas/current` 文件 > 不干预。`/persona status` 会打印这次到底是哪个来源定的。
+优先级：`--persona` > `PI_PERSONA` > 会话内记录 > `<cwd>/.pi/personas/current`（项目）> `~/.pi/agent/personas/current`（全局）> 不干预。`/persona status` 会打印这次到底是哪个来源定的，会把两层 current 都列出来。
 
-- 每次切换写一条 `custom` 会话条目（`customType: "persona"`，**不进 LLM 上下文**），resume 时还原。
-- 同时写 `personas/current` 文件，跨进程记忆；`/new` 之后仍然保留。
+- **默认只记录到当前目录**：`/persona reviewer` 写 `<cwd>/.pi/personas/current`，不碰全局文件。要写全局得显式写 `global`。理由：人设选择是“在这个项目里当谁”，不该渗到其他仓库去；而项目层压过全局层，所以“我在 A 目录切的”不会静默改变 B 目录。
+- 每次切换还写一条 `custom` 会话条目（`customType: "persona"`，**不进 LLM 上下文**），resume 时还原。
+- 两层 current 都是跨进程记忆；`/new` 之后仍然保留。
+- **项目钉子遮蔽全局选择**：一个目录只要有项目级 current，全局选择在这个目录就不生效（`off` 也一样，项目级 `off` 只关掉这个目录）。`/persona <name> global` 碰到这种情形会 notify 说清“这里还钉着 xxx，删掉 `<path>` 才轮到全局”，不会让你对着一个静默无效的写入排查。
+- 项目级 current 是**本机状态，不是项目配置**：不想进版本库就把 `.pi/personas/current` 加进 `.gitignore`（人设文件本身 `.pi/personas/*.md` 通常是要共享的，别一起 ignore）。
 - **没选 persona 时扩展完全不干预**，`SYSTEM.md` / `--system-prompt` / `APPEND_SYSTEM.md` 照常生效。
 - `/persona prompt` 导出的 `personas/system-prompt.txt`、`personas/system-prompt-as-sent.txt`、`personas/tools-as-sent.json`、`personas/prompt-notes.txt` 是**诊断产物**，每次写都覆写，不是状态。
 - 改 `.md` 立即生效（每个 run 重新读文件）；改 `.ts` 需要 `/reload`。
@@ -460,6 +468,8 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
 | 海盗还是知道工具 | 工具走 API `tools` 字段，用 front-matter `tools:` 或 `--tools` |
 | 海盗还是知道军令/cwd | 用了 sections 模式且没删对应段；要全干净用 `mode: bare` |
 | `--persona` 没反应 | `pi -ne` 禁用了扩展；该 flag 由扩展注册，见 `pi --help` 的 Extension CLI Flags |
+| `/persona x global` 写了，但这个目录行为没变 | 项目级 `<cwd>/.pi/personas/current` 还钉着另一个（或 `off`），它压过全局。`/persona dirs` / `status` 会列出两层 current，删掉项目那份就轮到全局 |
+| 换了目录，人设变了 / 没跟着变 | 默认选择是**按目录**记的（项目 current），不是全局的；新目录没有自己的 current 时会沿用全局那份 |
 
 ## 已知限制
 
@@ -479,6 +489,7 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
 14. **门控是 handler 时刻的快照**。`extensions:` 取的是 `pi.getAllTools()`、`context:` 取的是当时已在 `systemPromptOptions` 里的东西，两者都是**本扩展在 `before_agent_start` 里看到的值**。比它晚加载的扩展，同一轮的注册 / 追加 / 自定义段都看不到（它会排在后面改 options）。扩展顺位见[两种模式](#两种模式)。
 15. **工具能按来源门控，追加的提示词不能**。`ToolInfo` / `SkillInfo` / 上下文文件都带 `sourceInfo`，而 pi 在 loader 里就把各扩展的追加串 `join("\n\n")` 了（`agent-session.js`），到 handler 时只剩 `appendSystemPrompt` 一个字符串。所以 `context:` 对追加文本只能说 `append:pi`（本轮全部）/ `append:project` / `append:global`（两层文件）/ `append:other`（都不是，典型就是某个扩展写的）——要按扩展精确屏蔽，只能靠 `section:`（自定义段是分键的）。另外 `append:project` / `append:other` 是拿 `append_system.includes(层内容)` 判的：两层内容一字不差时会归到 `append:project`。
 16. **`extensions:` 只管 `selectedTools` 这条通道**。`--tools`、`hiddenTools`、`tool_search` / codemode 的动态加载照旧是 pi 的规则（第 4 条），门控不会把它们拉回来。
+17. **没有“取消本地钉子”的子命令**。`/persona off` 也是一种记录（写 `off`），不是清除；要让一个目录回到全局选择，得删 `<cwd>/.pi/personas/current`（`/persona dirs` 会告诉你路径）。加一个 `unpin` 得先回答“删哪一层、另一层要不要跟着动”，而手工 `rm` 已经能说清，所以上面 `global` 的告警只指文件，不拆文件。
 
 ## 设计决策
 
@@ -501,4 +512,7 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
 - **为什么没有 `on_error: abort`**：pi 的 `BeforeAgentStartEventResult` 只有 `message` / `systemPrompt`，没有取消语义；handler 抛错也只是 `extension_error`，run 照旧。提供一个做不到的选项比不提供更坑。
 - **为什么 `tools` / `rules` 是结构化渲染而不是抽字符串**：抽字符串在 `SYSTEM.md` / `--system-prompt` 在场时直接没有源（pi 不生成那三段），而 `toolSnippets` / `toolGuidelines` / `getActiveTools()` 这些结构化数据一直都在。代价是抄了 pi 的拼装规则，靠 golden + 活体 drift 测试兜漂移（见「验证与排错」）。
 - **为什么 `docs` 不永远兜底**：`customPrompt` 在场时 pi 本来就没有 `<docs>` 段，无脑填一份文案会凭空造出一个 pi 没有的段。所以只在"pi 本来会生成但抽取失败"时兜底，其余情况给空串，并把严格抽取的版本另存为 `{{ pi_docs }}`。
+- **为什么默认只记项目、`global` 才写全局**：人设回答的是“在这个仓库里当谁”，而工具集、`AGENTS.md`、项目本身都是按目录变的——写全局等于在 A 目录做的选择默默改写了 B 目录的行为，而后者只有在 B 目录里才会发现。两层都写会弄丢“默认”与“有意”的区别。所以写哪层就是参数：默认 `project`，`global` 显式声明；读的时候项目压过全局，旧的“跨进程记着上一次”行为不丢（没有项目钉子的目录照旧拿到全局那份）。`current` 放在各层的 `personas/` 里而不是另造一个状态目录，是为了“人设和它的选择在同一层”，`/persona dirs` 一眼能对上。
+- **为什么 `global` 是修饰词而不是子命令**：`/persona global reviewer` 与 `/persona reviewer global` 都得能用，而 `dirs/prompt/status/golden` 是子命令（名字位置不能拿）。于是 `parseArgs()`（core，tier 1 直接证）先把 `new` / `global` 从 token 里拆下，剩下的第一个才是名字：`new` 已经这么做了，`global` 跟着同一套。代价是 `global.md` 永不可达，所以把它放进 `RESERVED` 抖响，而不是静默选不到（`new.md` 同病，但不拆存量）。
+- **为什么项目钉子遮蔽全局时只告警不删文件**：“写了全局但这里不生效”是个会让人查半天静默失败，必须提；而“提完顺手删掉你的项目选择”是拿一个参数改写另一个层，不可逆。所以告警指名要删的文件，删不删由你（[已知限制 17](#已知限制)）。
 - **为什么 fail-safe**：模板写错不该让你没法工作——默认复用同一人设上一次成功的渲染，没得复用才退回 pi 原生 prompt，两者都 notify。

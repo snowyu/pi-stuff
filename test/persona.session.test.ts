@@ -7,11 +7,14 @@
  * up from `--persona` / `PI_PERSONA` / the session entry / `personas/current`, and the prompt a run
  * really starts with is the rendered template with pi's structured facts substituted in. It also
  * pins the failure posture (`on_error: last` reusing the previous render, `native` falling back)
- * which only exists once real handlers run.
+ * which only exists once real handlers run, and both `personas/current` scopes: a command records to
+ * the project file, and only `global` records to the agent-dir file.
  *
- * The project directory (`<cwd>/.pi/personas`) is not covered here: the harness builds its session
- * with `SessionManager.inMemory()`, which reports `process.cwd()` rather than the temp cwd. Test that
- * search order against a real pi process instead (test/real/persona.real.test.ts).
+ * The harness builds its session with `SessionManager.inMemory()`, whose cwd defaults to
+ * `process.cwd()` — not the `cwd` option. So this file chdirs the whole process into a throwaway
+ * project directory: project-scoped state becomes testable, and the repository's own `.pi/` stays
+ * clean. The same search order is also checked against a real pi process in
+ * test/real/persona.real.test.ts.
  *
  * Requires scripts/patch-pi-test-harness.mjs (run by `postinstall`) until upstream supports pi 1.x.
  */
@@ -47,6 +50,17 @@ after(() => {
 	process.env.PI_PERSONAS_PATH = savedPersonasPath;
 });
 
+/* The session cwd is process.cwd() (see the header), so a project-scoped personas/current would
+   otherwise land in this repository and leak between tests: run the whole file inside a throwaway
+   project directory instead. */
+const repoCwd = process.cwd();
+const projectDir = mkdtempSync(join(tmpdir(), "pi-stuff-persona-proj-"));
+process.chdir(projectDir);
+after(() => {
+	process.chdir(repoCwd);
+	rmSync(projectDir, { recursive: true, force: true });
+});
+
 function captures(): PromptCapture[] {
 	return ((globalThis as Record<string, unknown>)[CAPTURES_KEY] as PromptCapture[] | undefined) ?? [];
 }
@@ -63,6 +77,18 @@ function tempAgentDir(personas: Record<string, string>): string {
 
 function stateFile(agentDir: string): string {
 	return join(agentDir, "personas", "current");
+}
+
+/** Where a project-scoped `personas/current` lands for the session's cwd. */
+function projectStateFile(dir = projectDir): string {
+	return join(dir, ".pi", "personas", "current");
+}
+
+/** Write a file, creating its parents: for pins and personas planted by hand. */
+function plant(path: string, contents: string): string {
+	mkdirSync(join(path, ".."), { recursive: true });
+	writeFileSync(path, contents, "utf8");
+	return path;
 }
 
 /** Verbatim: the system text pi rendered for the last run. */
@@ -111,8 +137,9 @@ describe("persona in a real pi session", () => {
 		delete process.env.PI_PERSONA;
 		delete process.env.PI_PERSONAS_PATH;
 		// Isolate even the tests that choose no persona: without this, the developer's own
-		// <agent dir>/personas/current would decide what pi's prompt is.
+		// <agent dir>/personas/current would decide what pi's prompt is. Same for the project pin.
 		tempAgentDir({});
+		rmSync(join(projectDir, ".pi"), { recursive: true, force: true });
 	});
 
 	test("with no persona chosen, the prompt is pi's own and the extension stays silent", async () => {
@@ -356,12 +383,13 @@ describe("persona in a real pi session", () => {
 		}
 	});
 
-	test("the choice is remembered in personas/current and re-applied by a new session", async () => {
+	test("the choice is remembered in the project personas/current and re-applied by a new session", async () => {
 		const agentDir = tempAgentDir({ pirate: PIRATE });
 		const first = await createTestSession({ extensions: [PERSONA, CAPTURE] });
 		try {
 			await runCommand(first, "persona", "pirate");
-			assert.equal(readFileSync(stateFile(agentDir), "utf8").trim(), "pirate");
+			assert.equal(readFileSync(projectStateFile(), "utf8").trim(), "pirate");
+			assert.ok(!existsSync(stateFile(agentDir)), "the default records to the project, never to the global file");
 			const entries = first.session.sessionManager.getEntries() as Array<{ type: string; customType?: string; data?: { name?: string } }>;
 			const remembered = entries.filter((entry) => entry.type === "custom" && entry.customType === "persona");
 			assert.deepEqual(remembered.map((entry) => entry.data?.name), ["pirate"]);
@@ -373,9 +401,143 @@ describe("persona in a real pi session", () => {
 		const second = await createTestSession({ extensions: [PERSONA, CAPTURE] });
 		try {
 			await second.run(when("hi", [says("arr")]));
-			assert.match(captures()[0].customPrompt ?? "", /pirate coding matey/, "the new session read personas/current");
+			assert.match(captures()[0].customPrompt ?? "", /pirate coding matey/, "the new session read the project personas/current");
+			await runCommand(second, "persona", "status");
+			assert.match(lastNote(second), /from personas\/current \(project\)/);
 		} finally {
 			second.dispose();
+		}
+	});
+
+	test("/persona <name> global records to the agent dir instead of the project", async () => {
+		const agentDir = tempAgentDir({ pirate: PIRATE });
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "pirate global");
+			assert.equal(readFileSync(stateFile(agentDir), "utf8").trim(), "pirate", "the global file is the point of the modifier");
+			assert.ok(!existsSync(projectStateFile()), "and it does not also pin this directory");
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("a global write says so when this project already pins something else", async () => {
+		// The project pin wins, so a `global` write that changes nothing here is a silent no-op unless
+		// the shadow is named — with the file to delete.
+		const agentDir = tempAgentDir({ pirate: PIRATE, reviewer: REVIEWER });
+		plant(projectStateFile(), "reviewer\n");
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "pirate global");
+			assert.equal(readFileSync(stateFile(agentDir), "utf8").trim(), "pirate");
+			assert.match(lastNote(session), /still pins 'reviewer'/);
+			assert.ok(lastNote(session).includes(projectStateFile()), "and names the file to delete");
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("/persona dirs prints both state files and what each one pins", async () => {
+		const agentDir = tempAgentDir({ pirate: PIRATE });
+		plant(stateFile(agentDir), "pirate\n");
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "dirs");
+			const out = lastNote(session);
+			assert.ok(out.includes(projectStateFile()), "the project state path is printed, not just the search dirs");
+			assert.match(out, /state \(project\): -/, "no project pin is shown as '-', never invented");
+			assert.match(out, /state \(global\):  pirate/);
+			assert.ok(out.includes(stateFile(agentDir)), "and the global path is printed too");
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("a global write that cannot happen does not then tell you to delete the project pin", async () => {
+		const agentDir = tempAgentDir({ pirate: PIRATE, reviewer: REVIEWER });
+		plant(projectStateFile(), "reviewer\n");
+		mkdirSync(stateFile(agentDir), { recursive: true });   // personas/current blocked by a directory
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "pirate global");
+			assert.ok(notes(session).some((n) => /could not persist state/.test(n)), "the failed write is reported");
+			assert.ok(!notes(session).some((n) => /still pins/.test(n)), "no advice about a write that did not happen");
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("the project pin wins over the global pin", async () => {
+		const agentDir = tempAgentDir({ pirate: PIRATE, reviewer: REVIEWER });
+		plant(stateFile(agentDir), "pirate\n");
+		plant(projectStateFile(), "reviewer\n");
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await session.run(when("hi", [says("hm")]));
+			assert.match(captures()[0].customPrompt ?? "", /senior code reviewer/, "this directory's choice decides");
+			assert.ok(!(captures()[0].customPrompt ?? "").includes("pirate coding matey"));
+		} finally {
+			session.dispose();
+		}
+	});
+
+	test("a project pin of off turns off a global pin in this directory only", async () => {
+		const agentDir = tempAgentDir({ pirate: PIRATE });
+		plant(stateFile(agentDir), "pirate\n");
+		const first = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(first, "persona", "off");
+			assert.equal(readFileSync(projectStateFile(), "utf8").trim(), "off");
+			assert.equal(readFileSync(stateFile(agentDir), "utf8").trim(), "pirate", "the global pin is left alone");
+		} finally {
+			first.dispose();
+		}
+
+		(globalThis as Record<string, unknown>)[CAPTURES_KEY] = [];
+		const second = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await second.run(when("hi", [says("ok")]));
+			assert.equal(captures()[0].customPrompt, undefined, "off recorded here beats a global persona");
+			assert.match(captures()[0].prompt, /coding assistant running inside pi/);
+		} finally {
+			second.dispose();
+		}
+	});
+
+	test("a directory with no project pin still picks up the global one", async () => {
+		const agentDir = tempAgentDir({ pirate: PIRATE });
+		plant(stateFile(agentDir), "pirate\n");
+		const other = mkdtempSync(join(tmpdir(), "pi-stuff-persona-proj-"));
+		const back = process.cwd();
+		process.chdir(other);
+		try {
+			const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+			try {
+				await session.run(when("hi", [says("arr")]));
+				assert.match(captures()[0].customPrompt ?? "", /pirate coding matey/, "the remembered global choice still applies");
+				await runCommand(session, "persona", "status");
+				assert.match(lastNote(session), /from personas\/current \(global\)/);
+			} finally {
+				session.dispose();
+			}
+		} finally {
+			process.chdir(back);
+			rmSync(other, { recursive: true, force: true });
+		}
+	});
+
+	test("/persona status shows both pins, so 'which file decides here' is answerable", async () => {
+		const agentDir = tempAgentDir({ pirate: PIRATE, reviewer: REVIEWER });
+		plant(stateFile(agentDir), "pirate\n");
+		const session = await createTestSession({ extensions: [PERSONA, CAPTURE] });
+		try {
+			await runCommand(session, "persona", "reviewer");
+			await runCommand(session, "persona", "status");
+			const status = lastNote(session);
+			assert.match(status, /state: project=reviewer global=pirate/, "both pins are visible, and the project one is what decided");
+			assert.match(status, /current: reviewer  \(from command\)/);
+		} finally {
+			session.dispose();
 		}
 	});
 
@@ -643,7 +805,8 @@ describe("persona in a real pi session", () => {
 			await runCommand(session, "persona", "pirate new");
 			// The choice is persisted before newSession, so the fresh session restores it; and `new` is a
 			// flag, not a persona name.
-			assert.equal(readFileSync(stateFile(process.env.PI_CODING_AGENT_DIR ?? ""), "utf8").trim(), "pirate");
+			assert.equal(readFileSync(projectStateFile(), "utf8").trim(), "pirate");
+			assert.ok(!existsSync(stateFile(process.env.PI_CODING_AGENT_DIR ?? "")), "`new` never promotes the choice to global");
 			assert.ok(!lastNote(session).includes("No such persona: new"), "`new` must not be read as a name");
 			await session.run(when("hi", [says("arr")]));
 			assert.match(captures()[0].customPrompt ?? "", /pirate coding matey/);
@@ -663,6 +826,7 @@ describe("persona in a real pi session", () => {
 			const everything = await runner.getCommand("persona")?.getArgumentCompletions?.("");
 			assert.ok(everything?.some((item) => item.value === "off"), "off must be completable");
 			assert.ok(everything?.some((item) => item.value === "golden"), "golden must be completable");
+			assert.ok(everything?.some((item) => item.value === "global"), "the global modifier must be completable");
 		} finally {
 			session.dispose();
 		}

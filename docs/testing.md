@@ -126,10 +126,14 @@ test asserts the same fixture's output really does reach the prompt when no gate
 (`test/real/persona.real.test.ts`): the `sourceInfo` values a fixture gets in the harness are not a
 promise about what a loaded package gets in a real run.
 
-One trap in tier 2: the harness builds its session with `SessionManager.inMemory()`, which reports
-`process.cwd()`, not the `cwd` option. Anything the extension resolves from
-`ctx.sessionManager.getCwd()` (project config, project personas) is the repository in tier 2 and the
-scenario workspace in tier 3 — so test that part against a real process.
+One trap in tier 2 — and its workaround: the harness builds its session with `SessionManager.inMemory()`,
+whose `cwd` defaults to `process.cwd()` (evaluated at call time), not the harness `cwd` option. So
+anything the extension resolves from `ctx.sessionManager.getCwd()` (project config, project personas,
+the project-level `personas/current` pin) is the **repository** unless the test moves the process.
+`test/persona.session.test.ts` therefore `process.chdir()`s a throwaway `mkdtemp` project directory for
+the whole file and restores it in `after()`: project-scoped state becomes assertable, pins cannot leak
+between tests, and the working tree stays clean. Tier 3 (`test/real/`) still covers the same read path
+with a real session cwd — do not rely on the chdir to stand in for that.
 
 **Known issue — the harness needs a patch on pi 1.x.** Version 0.6.1 was released against pi
 0.74/0.75. `scripts/patch-pi-test-harness.mjs` (wired to `postinstall`) fixes four breakages:

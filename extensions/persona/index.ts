@@ -37,11 +37,13 @@ import {
 	isOff,
 	isReserved,
 	normalizeName,
+	parseArgs,
 	parsePersona,
 	renderPromptNotes,
 	resolveCurrent,
 	resolveMode,
 	resolveOnError,
+	type StateScope,
 } from "./core.ts";
 
 const ENTRY = "persona";
@@ -85,7 +87,19 @@ function readSafe(cwd: string, name: string): string | undefined {
 	return undefined;
 }
 
-const statePath = () => join(getAgentDir(), "personas", "current");
+/**
+ * 人设的持久状态有两个文件，同名不同层：
+ *
+ * - `project`：`<cwd>/.pi/personas/current` —— `/persona <name>` **默认只写这里**。
+ * - `global`：`~/.pi/agent/personas/current` —— 只有 `/persona <name> global` 写。
+ *
+ * 读的时候项目压过全局（`resolveCurrent`），所以“这个目录里钉着谁”由项目那份决定；
+ * 项目里没有就沿用全局，以前的“跨进程记住上一次”行为不会丢。
+ */
+const statePaths = (cwd: string): Record<StateScope, string> => ({
+	project: join(cwd, CONFIG_DIR_NAME, "personas", "current"),
+	global: join(getAgentDir(), "personas", "current"),
+});
 
 /**
  * `/persona status` 的门控行。front-matter 写了什么就说什么——切了人设还没跑时也要看得见，
@@ -97,9 +111,9 @@ function gateLine(meta: PersonaMeta | undefined, applied: PersonaDecision["gates
 	const declared = meta !== undefined && (meta.extensions !== undefined || meta.context !== undefined);
 	return line + (declared && !applied ? " (front-matter; no run has applied them yet)" : "");
 }
-const readState = (): string => {
+const readStateFile = (path: string): string => {
 	try {
-		return existsSync(statePath()) ? readFileSync(statePath(), "utf8").trim() : "";
+		return existsSync(path) ? readFileSync(path, "utf8").trim() : "";
 	} catch {
 		return "";
 	}
@@ -282,37 +296,54 @@ export default function persona(pi: ExtensionAPI) {
 		lastWarnKey = key;
 	};
 
-	function persist(name: string, ctx: ExtensionContext) {
+	/** 记一个选择：会话条目 + 对应层的 personas/current。返回“项目钉子遮蔽了全局”的警告（没有则 undefined），
+	 *  由调用方在成功提示**之后**发——否则“写了全局但这里不生效”会被成功提示掩盖。 */
+	function persist(name: string, ctx: ExtensionContext, cwd: string, scope: StateScope): string | undefined {
 		current = name;
 		currentSource = "command";
 		lastError = undefined;
+		const sp = statePaths(cwd);
+		let written = false;
 		try {
 			pi.appendEntry(ENTRY, { name });
-			mkdirSync(dirname(statePath()), { recursive: true });
-			writeFileSync(statePath(), name, "utf8");
+			mkdirSync(dirname(sp[scope]), { recursive: true });
+			writeFileSync(sp[scope], name, "utf8");
+			written = true;
 		} catch (e) {
 			ctx.ui.notify(`persona: could not persist state: ${(e as Error).message}`, "warning");
 		}
 		status(ctx);
+		// 写了全局，但这个目录的项目级钉子还在，而项目压过全局——不提醒就变成“我写了全局，什么也没变”。
+		// 只在真写成了之后提醒：写失败另有告警，不该再叠一条“去删那个文件”的建议。
+		const pinned = readStateFile(sp.project);
+		return written && scope === "global" && pinned && pinned !== name
+			? `this project still pins '${pinned}' — the project personas/current wins over the global one. `
+				+ `The global choice applies here once you remove ${sp.project}, and everywhere else right away.`
+			: undefined;
 	}
 
 	pi.on("session_start", (_e, ctx) => {
 		try {
 			lastCwd = ctx.sessionManager.getCwd();
+			const sp = statePaths(lastCwd);
 			const entries = ctx.sessionManager.getEntries() as Array<any>;
 			const sessionEntry = [...entries].reverse()
 				.find((e) => e.type === "custom" && e.customType === ENTRY)?.data?.name;
+			const projectPin = readStateFile(sp.project);
+			const globalPin = readStateFile(sp.global);
 			const picked = resolveCurrent({
 				flag: String(pi.getFlag("persona") ?? ""),
 				env: process.env.PI_PERSONA ?? "",
 				sessionEntry,
-				stateFile: readState(),
+				projectState: projectPin,
+				globalState: globalPin,
 			});
 			current = picked;
 			currentSource = picked === undefined ? "(none)"
 				: String(pi.getFlag("persona") ?? "").trim() ? "--persona flag"
 					: (process.env.PI_PERSONA ?? "").trim() ? "PI_PERSONA env"
-						: sessionEntry ? "session entry" : "personas/current";
+						: sessionEntry ? "session entry"
+							: projectPin ? "personas/current (project)" : "personas/current (global)";
 			lastGood = undefined;
 			lastError = undefined;
 			// 快照是会话级的：不清就会把上一个会话的 prompt 当成本会话的导出。
@@ -433,9 +464,9 @@ export default function persona(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("persona", {
-		description: "Switch persona: /persona [name] [new] · off · dirs · prompt · status · golden",
+		description: "Switch persona: /persona [name] [new] [global] · off · dirs · prompt · status · golden",
 		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
-			const items = [OFF, "dirs", "prompt", "status", "golden", ...list(lastCwd)]
+			const items = [OFF, "dirs", "prompt", "status", "golden", "global", ...list(lastCwd)]
 				.filter((n) => n.startsWith(prefix)).map((n) => ({ value: n, label: n }));
 			return items.length ? items : null;
 		},
@@ -447,17 +478,25 @@ export default function persona(pi: ExtensionAPI) {
 				const head = (tokens[0] ?? "").toLowerCase();
 
 				if (head === "dirs") {
-					ctx.ui.notify(dirs(cwd).map((d) => `${existsSync(d) ? "✓" : "✗"} ${d}`).join("\n"), "info");
+					const sp = statePaths(cwd);
+					ctx.ui.notify([
+						...dirs(cwd).map((d) => `${existsSync(d) ? "✓" : "✗"} ${d}`),
+						"",
+						`state (project): ${readStateFile(sp.project) || "-"}  ${sp.project}`,
+						`state (global):  ${readStateFile(sp.global) || "-"}  ${sp.global}`,
+					].join("\n"), "info");
 					return;
 				}
 				if (head === "status") {
 					const raw = current && !isOff(current) ? readSafe(cwd, current) : undefined;
 					const meta = raw === undefined ? undefined : parsePersona(raw).meta;
+					const sp = statePaths(cwd);
 					ctx.ui.notify([
 						`current: ${current ?? "(none)"}  (from ${currentSource})`,
 						`mode: ${meta ? resolveMode(meta) : "(persona unreadable)"}`,
 						`on_error: ${meta ? resolveOnError(meta) : "-"}`,
 						`cache: ${lastGood ? `${lastGood.persona} (${lastGood.mode})` : "(empty)"}`,
+						`state: project=${readStateFile(sp.project) || "-"} global=${readStateFile(sp.global) || "-"}`,
 						gateLine(meta, lastGates),
 						`last error: ${lastError ? `${lastError.at} ${lastError.persona}: ${lastError.message}` : "(none)"}`,
 					].join("\n"), "info");
@@ -557,16 +596,17 @@ export default function persona(pi: ExtensionAPI) {
 					ctx.ui.notify(`golden fixture written: ${out}`, "info");
 					return;
 				}
-				const wantNew = tokens.some((t) => t.toLowerCase() === "new");
-				let name = normalizeName(tokens.find((t) => t.toLowerCase() !== "new"));
+				const { name: chosen, wantNew, scope } = parseArgs(tokens);
+				let name = chosen;
 				if (!name) {
 					const picked = await ctx.ui.select("Persona:", [OFF, ...list(cwd)]);
 					if (!picked) return;
 					name = normalizeName(picked);
 				}
 				if (isOff(name)) {
-					persist(OFF, ctx);
+					const shadow = persist(OFF, ctx, cwd, scope);
 					ctx.ui.notify("Persona off (pi native prompt)", "info");
+					if (shadow) ctx.ui.notify(`persona: ${shadow}`, "warning");
 					if (wantNew) await ctx.newSession();
 					return;
 				}
@@ -580,8 +620,9 @@ export default function persona(pi: ExtensionAPI) {
 					return;
 				}
 				const desc = parsePersona(raw).meta.description;
-				persist(name, ctx);
-				ctx.ui.notify(`Persona: ${name}${desc ? ` — ${desc}` : ""}`, "info");
+				const shadow = persist(name, ctx, cwd, scope);
+				ctx.ui.notify(`Persona: ${name}${desc ? ` — ${desc}` : ""}${scope === "global" ? " (global)" : ""}`, "info");
+				if (shadow) ctx.ui.notify(`persona: ${shadow}`, "warning");
 				if (wantNew) await ctx.newSession();
 			} catch (e) {
 				ctx.ui.notify(`persona command failed: ${(e as Error).message}`, "error");

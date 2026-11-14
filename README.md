@@ -18,7 +18,7 @@ pi config                                    # toggle individual resources
 | Path | |
 |---|---|
 | [`extensions/proxy-guard.ts`](extensions/proxy-guard.ts) | keep web tools working when the configured proxy is down; switch proxy/direct per run — [docs](docs/proxy-guard.md) |
-| [`extensions/persona/`](extensions/persona) | swap pi's preamble for a persona file; `{{tools}}`/`{{rules}}`/`{{docs}}` are re-assembled from pi's structured facts, not scraped from its text; `extensions:` / `context:` in the front-matter gate which extension's tools and which appended prompt layers may in — [docs](docs/persona.md). `index.ts` is the wiring, `core.ts` is a pure core with no pi import |
+| [`extensions/persona/`](extensions/persona) | swap pi's preamble for a persona file; `{{tools}}`/`{{rules}}`/`{{docs}}` are re-assembled from pi's structured facts, not scraped from its text; `extensions:` / `context:` in the front-matter gate which extension's tools and which appended prompt layers may in — [docs](docs/persona.md). `index.ts` is the wiring, `core.ts` is a pure core with no pi import. `/persona <name>` pins the current directory (`<cwd>/.pi/personas/current`); `global` pins the user (`~/.pi/agent/personas/current`), and project outranks global |
 | [`personas/`](personas) | the personas the extension above ships with (`default`, `reviewer`, `pirate`, `pirate-plus`, `audited` and `quiet` for the source gates, plus `_*.md` fragments for `include()`); pi ignores this directory, a project's `.pi/personas` overrides it |
 | `skills/` `prompts/` `themes/` | empty for now; pi discovers resources from these directories automatically |
 | [`docs/extension-conventions.md`](docs/extension-conventions.md) | how an extension in this package is written, configured, documented and reviewed |
@@ -88,12 +88,16 @@ npm run typecheck    # tsc --noEmit against pi's own types
 - `persona` in one line each: `on_error: last | native` decides what a failed render does (there is no
   `abort` — pi's `before_agent_start` cannot cancel a run); `PI_PERSONA` / `PI_PERSONAS_PATH` are
   process-wide and the env beats a remembered session choice; persona names are plain filenames, so
-  `..` `/` `\` `:` and the reserved words `off dirs prompt status golden` are rejected; `extensions:` /
+  `..` `/` `\` `:` and the reserved words `off dirs prompt status golden global` are rejected;
+  `/persona <name>` records to `<cwd>/.pi/personas/current` — only `/persona <name> global` writes
+  `~/.pi/agent/personas/current`, and the project file outranks the global one on read; `extensions:` /
   `context:` are glob gates over pi's `SourceInfo` (tools) and over appended context (AGENTS.md, skills,
   other extensions' sections, both `APPEND_SYSTEM.md` layers), with `!` for exclusion and no separate
   `deny:` key. Details:
   [docs/persona.md](docs/persona.md).
-- Runtime state (for example `~/.pi/agent/proxy-guard.json`, `~/.pi/agent/personas/current`,
+- Runtime state (for example `~/.pi/agent/proxy-guard.json`, the persona pins `<cwd>/.pi/personas/current`
+  and `~/.pi/agent/personas/current`,
   and the `/persona prompt` exports under `~/.pi/agent/personas/`: `system-prompt.txt`, `system-prompt-as-sent.txt`, `tools-as-sent.json`, `prompt-notes.txt`) lives outside this repo.
+  The project-level pin is machine state, not project config: gitignore `.pi/personas/current` if you don't want it committed.
 - Do not keep a loose copy of an extension in `~/.pi/agent/extensions/` while also loading it through
   this package: it would load twice.

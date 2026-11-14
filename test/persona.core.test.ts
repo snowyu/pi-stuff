@@ -16,6 +16,7 @@ import {
 	decidePersona,
 	extractSection,
 	normalizeName,
+	parseArgs,
 	parseMeta,
 	parsePersona,
 	renderDocs,
@@ -83,7 +84,7 @@ describe("names", () => {
 		}
 	});
 	test("reserved names are rejected case-insensitively", () => {
-		for (const bad of ["off", "OFF", "Dirs", "prompt", "STATUS", "golden"]) {
+		for (const bad of ["off", "OFF", "Dirs", "prompt", "STATUS", "golden", "global", "Global"]) {
 			assert.throws(() => assertSafeName(bad), `expected ${bad} to be rejected`);
 		}
 	});
@@ -97,11 +98,42 @@ describe("names", () => {
 });
 
 describe("precedence", () => {
-	test("flag > env > entry > file; blank means unset", () => {
-		assert.equal(resolveCurrent({ flag: "a", env: "b", sessionEntry: "c", stateFile: "d" }), "a");
+	test("flag > env > entry > project pin > global pin; blank means unset", () => {
+		assert.equal(resolveCurrent({ flag: "a", env: "b", sessionEntry: "c", projectState: "d", globalState: "e" }), "a");
 		assert.equal(resolveCurrent({ env: "  ", sessionEntry: "c" }), "c");
 		assert.equal(resolveCurrent({ env: "OFF" }), "off");
-		assert.equal(resolveCurrent({ flag: "", env: "", sessionEntry: "", stateFile: "" }), undefined);
+		assert.equal(resolveCurrent({ flag: "", env: "", sessionEntry: "", projectState: "", globalState: "" }), undefined);
+	});
+	test("the project pin wins over the global pin", () => {
+		assert.equal(resolveCurrent({ projectState: "proj", globalState: "glob" }), "proj",
+			"/persona writes the project file by default, so it is the one that decides here");
+	});
+	test("with no project pin, the global pin still applies", () => {
+		assert.equal(resolveCurrent({ globalState: "glob" }), "glob", "a remembered global choice is not lost");
+	});
+	test("a project pin of off really means off", () => {
+		assert.equal(resolveCurrent({ projectState: " OFF ", globalState: "glob" }), "off");
+	});
+});
+
+describe("command arguments: name, new, scope", () => {
+	test("the scope defaults to the project — the issue this guards", () => {
+		assert.deepEqual(parseArgs(["pirate"]), { name: "pirate", wantNew: false, scope: "project" });
+	});
+	test("`global` asks for the global pin, in either order", () => {
+		assert.deepEqual(parseArgs(["reviewer", "global"]), { name: "reviewer", wantNew: false, scope: "global" });
+		assert.deepEqual(parseArgs(["global", "reviewer"]), { name: "reviewer", wantNew: false, scope: "global" });
+	});
+	test("`new` and `global` are modifiers, not names, and order does not matter", () => {
+		assert.deepEqual(parseArgs(["pirate", "new", "global"]), { name: "pirate", wantNew: true, scope: "global" });
+		assert.deepEqual(parseArgs(["Global", "PIRATE.md", "New"]), { name: "PIRATE", wantNew: true, scope: "global" });
+	});
+	test("no name means the selector, and off is project-scoped by default", () => {
+		assert.deepEqual(parseArgs([]), { name: undefined, wantNew: false, scope: "project" });
+		assert.deepEqual(parseArgs(["off"]), { name: "off", wantNew: false, scope: "project" });
+	});
+	test("a lone modifier asks the selector and keeps the modifier", () => {
+		assert.deepEqual(parseArgs(["global"]), { name: undefined, wantNew: false, scope: "global" });
 	});
 });
 

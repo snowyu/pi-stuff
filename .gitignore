@@ -3,3 +3,6 @@ node_modules/
 .DS_Store
 coverage/
 .tmp/
+
+# persona: per-directory pin is machine state, not project config
+.pi/personas/current

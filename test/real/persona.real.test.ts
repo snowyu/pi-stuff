@@ -26,7 +26,11 @@ function testAgentDir(files: Record<string, string> = {}): string {
 	const dir = mkdtempSync(join(tmpdir(), "pi-stuff-persona-real-"));
 	mkdirSync(join(dir, "sessions"), { recursive: true });
 	writeFileSync(join(dir, "settings.json"), `${JSON.stringify({ packages: [] }, null, 2)}\n`);
-	for (const [name, contents] of Object.entries(files)) writeFileSync(join(dir, name), contents);
+	for (const [name, contents] of Object.entries(files)) {
+		const file = join(dir, name);
+		mkdirSync(dirname(file), { recursive: true });
+		writeFileSync(file, contents);
+	}
 	return dir;
 }
 
@@ -206,5 +210,33 @@ describe("persona against a real pi process", () => {
 		assert.match(prompt, /project=\[project layer rules\]/, "the layer pi shipped");
 		assert.match(prompt, /global=\[global layer rules\]/, "the layer pi skipped is reachable on purpose, not invented");
 		assert.ok(!/pi=\[[^\]]*global layer/.test(prompt), "{{ append_system }} 里只有一份：不能假称 pi 追了两层");
+	});
+
+	test("the project personas/current pins the persona for that directory", async () => {
+		// No flag, no env: only a `current` an earlier `/persona` wrote in this project. Tier 3 is where the
+		// session cwd is a real workspace, so this is the real-process proof of the read path.
+		const { run } = await runPersonaScenario("project-pin", {}, {
+			".pi/personas/captain.md": "You are the project's captain.\n",
+			".pi/personas/current": "captain",
+		});
+		assert.match(getSystemPrompt(run), /project's captain/);
+		assert.ok(!getSystemPrompt(run).includes("coding assistant running inside pi"));
+	});
+
+	test("a global personas/current applies until this project pins its own", async () => {
+		const agent = { "personas/captain.md": "You are the user's captain.\n", "personas/current": "captain" };
+
+		// A directory with no pin of its own keeps the remembered global choice.
+		const inherited = await runPersonaScenario("global-pin", {}, {}, undefined, agent);
+		assert.match(getSystemPrompt(inherited.run), /user's captain/, "the global personas/current still applies");
+
+		// The same global choice, but this project pins something else: project wins.
+		const pinned = await runPersonaScenario("project-beats-global", {}, {
+			".pi/personas/navigator.md": "You are the project's navigator.\n",
+			".pi/personas/current": "navigator",
+		}, undefined, agent);
+		const prompt = getSystemPrompt(pinned.run);
+		assert.match(prompt, /project's navigator/, "the project pin outranks the global one");
+		assert.ok(!prompt.includes("user's captain"));
 	});
 });
