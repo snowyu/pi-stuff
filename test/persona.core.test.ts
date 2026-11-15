@@ -677,7 +677,7 @@ const gateRun = (raw: string, over: Partial<Parameters<typeof decidePersona>[0]>
 		assert.equal(compileGate(parseGate(["*", "!nothing:here"]) as GateSpec, "linux")(toolKeys(MANY[2])).ok, true);
 	});
 	test("a gate pattern that is nothing but `!` is refused, not treated as a deny-all", () => {
-		assert.throws(() => parsePersona('---\ncontext: ["!"]\n---\nx\n'), /gate pattern is empty/);
+		assert.throws(() => parsePersona('---\ncontext: ["!"]\n---\nx\n'), /"!" excludes nothing/);
 	});
 
 	test("extensions: [\"builtin\"] keeps pi's own tools and drops the ones other extensions registered", () => {
@@ -743,7 +743,11 @@ const gateRun = (raw: string, over: Partial<Parameters<typeof decidePersona>[0]>
 	test("an empty gate list warns and drops everything it gates", () => {
 		const d = gateRun('---\nextensions: []\n---\nhi\n', { facts: many() });
 		assert.deepEqual(d.selectedTools, []);
-		assert.match(d.warnings.join("\n"), /extensions: gate is an empty pattern list/);
+		assert.match(d.warnings.join("\n"), /extensions: \[\] means no tools at all/);
+		// 文案用人话：点名后果 + 给逃生门。不许出现内部词 `gate`（使用者不懂），
+		// 也不能只报告现一个 empty list。
+		assert.doesNotMatch(d.warnings.join("\n"), /\bgate\b/i, "user-facing copy must not say \"gate\"");
+		assert.match(d.warnings.join("\n"), /write "\*" to keep them all/);
 	});
 	test("一个只写了空串的列表也是“全关”，不是“不过滤”", () => {
 		assert.deepEqual(parseGate([""]), { allow: [], deny: [], patterns: [], empty: true });
@@ -751,7 +755,8 @@ const gateRun = (raw: string, over: Partial<Parameters<typeof decidePersona>[0]>
 		assert.deepEqual(d.filter.agents, []);
 		assert.deepEqual(d.filter.skills, []);
 		assert.equal(d.filter.append, false);
-		assert.match(d.warnings.join("\n"), /context: gate is an empty pattern list/);
+		assert.match(d.warnings.join("\n"), /context: \[\] removes everything pi adds/);
+		assert.doesNotMatch(d.warnings.join("\n"), /\bgate\b/i, "同上：用人话，不说 gate");
 	});
 
 	test("context: unset keeps every contribution pi gave us, exactly as before", () => {

@@ -391,7 +391,8 @@ export function parseGate(raw: Gate | undefined): GateSpec | undefined {
 	for (const p of patterns) {
 		if (p[0] !== "!") { allow.push(p); continue; }
 		const bare = p.slice(1).trim();
-		if (!bare) throw new PersonaError(`gate pattern is empty: ${JSON.stringify(p)}`);
+		// 不写 "gate pattern is empty"：报错要告诉作者怎么写对，而不是描述内部词。
+		if (!bare) throw new PersonaError(`"!" excludes nothing: write what to drop, e.g. "!append:global" (got ${JSON.stringify(p)})`);
 		deny.push(bare);
 	}
 	return { allow, deny, patterns, empty: false };
@@ -779,7 +780,10 @@ export function decidePersona(input: DecideInput): PersonaDecision {
 			extHits.push(hit);
 			if (hit.ok) kept.push(n);
 		}
-		if (extSpec.empty) warnings.push('extensions: gate is an empty pattern list, so nothing matches; use "*" for no filter');
+		// 文案给人看，不拿内部词：不写 gate / pattern list / allowlist，直接说“没工具了”和怎么改。
+		// 旧写法（`gate is an empty pattern list, so nothing matches; use "*" for no filter`）两个坑：术语读不懂，
+		// 而且把原因和逃生门挨在一起，会被读成“空列表 = 不过滤”，恰好反了。文案本身有测试。
+		if (extSpec.empty) warnings.push('extensions: [] means no tools at all: tools registered by every extension are dropped; write "*" to keep them all');
 		for (const p of unusedPatterns(extSpec, extHits)) {
 			warnings.push(`extensions: pattern matched nothing: ${JSON.stringify(p)}`);
 		}
@@ -827,7 +831,8 @@ export function decidePersona(input: DecideInput): PersonaDecision {
 		skills = facts.skills.filter((s) => hit(skillKeys(s)));
 		filter.skills = skills.map((s) => s.name);
 		filter.dropSections = facts.foreignSections.filter((tag) => !hit(sectionKeys(tag)));
-		if (ctxSpec.empty) warnings.push('context: gate is an empty pattern list, so nothing matches; use "*" for no filter');
+		// 同上：点名被砍掉的四类东西。文案里的 `[]` 泛指 `[]` 与 `[""]` 两种空写法。
+		if (ctxSpec.empty) warnings.push('context: [] removes everything pi adds: AGENTS.md, the skills list, APPEND_SYSTEM.md, and sections from other extensions; write "*" to keep them');
 		for (const p of unusedPatterns(ctxSpec, ctxHits)) {
 			warnings.push(`context: pattern matched nothing: ${JSON.stringify(p)}`);
 		}

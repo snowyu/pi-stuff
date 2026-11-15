@@ -278,7 +278,7 @@ context: ["*", "!**/vendor/**", "!append:global", "!section:proxy_guard"]
 - `extensions: "*"` / `context: "*"`（或省略）= 不过滤，就是默认行为；`tools:` 也一样，省略与 `"*"` 都是"跟实时 loadout"。YAML 里 `*` **必须加引号**（裸 `*` 是 alias，front-matter 会明确报错）。
 - `"*"` 按"全部"处理，不是 glob 的单层匹配——包来源里带 `/`，真 glob 会漏。要单层就写 `"git:github.com/snowyu/*"`。
 - **没命中过的 pattern 会 notify 告警**（`extensions: pattern matched nothing: "…"`，每个 run 都会重提）。打错一个字母的包名不会静默变成"什么都没过滤"。
-- `[]`（或只写了空串）是**显式全关**，并告警；不是你忘写了。相反，`"*"` 才是"不过滤"。`tools:` 用同一套三态，只是 `tools: []` 不告警——不声明工具就是人设的本意。
+- `[]`（或只写了空串 `[""]`）是**显式全关**：`extensions: []` 一个来源都不留，`context: []` 把 AGENTS.md、技能清单、`APPEND_SYSTEM.md` 两层、别的扩展注入的段**全部**排除。同时 notify 告警（`context: [] removes everything pi adds: AGENTS.md, the skills list, APPEND_SYSTEM.md, and sections from other extensions; write "*" to keep them`；文案里的 `[]` 泛指两种空写法）——它不是"忘写"，也不是"没过滤"，`"*"` 才是不过滤。`tools:` 用同一套三态，只是 `tools: []` 不告警——不声明工具就是人设的本意。
 - **`!` 项要加引号**：`"!append:global"`。块数组里裸写 `- !append:global` 在 YAML 里是 tag不是字符串，front-matter 会明确报错（`bare ! is a YAML tag: quote it as "!append:global"`），不会当成否定：
 
   ```yaml
@@ -287,7 +287,7 @@ context: ["*", "!**/vendor/**", "!append:global", "!section:proxy_guard"]
     - "!append:global"
     - "!**/vendor/**"
   ```
-- `"!"` 后面什么都没有（`"!"`、`"!  "`）会报错，不会被当成"deny 一切"。
+- `"!"` 后面什么都没有（`"!"`、`"!  "`）会报错（`"!" excludes nothing: write what to drop, e.g. "!append:global" (got "!")`），不会被当成"deny 一切"。
 - 工具名字在 `getAllTools()` 里找不到来源时（少见：`selectedTools` 里有一个未注册的名字）按 `source: "unknown"` 处理并告警，不静默归类到 `builtin`。
 - 两种模式都生效：门控改的是 `systemPromptOptions`（`selectedTools` / `contextFiles` / `skills` / `appendSystemPrompt` / `sections`），不是模板文本。
 - `context:` 砍技能时，`{{ skills_prompt }}` 是**用活下来的技能重渲染**的，不是在 pi 的文本上做字符串删除。
@@ -508,6 +508,7 @@ pi 不把 prompt 当一坨字符串存：首次请求落一条 system 消息带*
 - **为什么工具能按来源门控而追加文本只能按层**：`getAllTools()[].sourceInfo` 把每个工具归到注册它的扩展（`source` / `scope` / `path`），这是 pi 已有的事实，本扩展不重新发明。追加的提示词没有这个事实：pi 在 loader 里就 `loaderAppendSystemPrompt.join("\n\n")`，`BuildSystemPromptOptions.appendSystemPrompt` 是一个汇流后的串。要按扩展门控它就得自己记"谁追加了什么"，那是在这里抄一遍 pi 的汇流规则（而汇流顺序会变）。所以只说能确定的 `append:pi/project/global/other`，并把判不准的部分写破（[已知限制 15](#已知限制)）。
 - **为什么门控要重新发现 `APPEND_SYSTEM.md` 两层**：pi 只送**一层**（项目命中就跳过全局），`BuildSystemPromptOptions` 里没副本可拿。而"项目层遮蔽了全局层"是真会咬人的，人设得能显式要两层，所以 `{{ append_project }}` / `{{ append_global }}` 自己按 pi 的规则（项目需 trust、全局在 agentDir）读一遍，被 trust / `--append-system-prompt` 挡住的那层给空串 —— 发现不到就是空，不造假。`append_system` 始终是"pi 本轮真送的那一串"，两者在 `context:` 的键里分得清。
 - **为什么没命中过的 pattern 要告警**：与 front-matter 其余部分同一个姿态（`mode` 写错报错、`{{ pi_docs }}` 保留字面量）。门控是白名单语义，打错的 pattern 等价于"没写"，静默就是安全边界静默失效。`[]` 同理：它不是漏写，得告警 + 说清 `"*"` 才是"不过滤"。
+- **为什么告警文案不许用实现术语**：`gate` / `pattern list` / `allowlist` 是本文档和代码里的说法，人设作者不读代码，看到只会去查"gate 是什么"而不是"我该怎么办"。notify 里只说三件事：**后果**（`no tools at all` / `removes everything pi adds`，并逐项点名被砍的东西）、**这是已生效的决定**、**逃生门**（`write "*" to keep them`）。旧文案 `gate is an empty pattern list, so nothing matches; use "*" for no filter` 同术语问题之外还把原因和逃生门挨在一起，读起来像空列表会退化成不过滤——正相反。文案进测试（`assert.doesNotMatch(..., /\bgate\b/i)`），术语回流会被拦下。
 - **为什么 `tools: []` 是全关而不是"当没写"**：省略与 `"*"` 都等于"跟实时 loadout"，那 `[]` 必须表示另一回事，否则"没写"和"我不要工具"在文件里长得一样。`tools:` 后面空着（YAML 的 null）仍算没写，只认空列表这一种全关写法。全关时 `<tools>` 不消失，里面是 pi 自己的 `(none)`（`system-prompt.js` 在 visibleTools 为空时就写 `(none)`），比静默删段好排查。
 - **为什么没有 `on_error: abort`**：pi 的 `BeforeAgentStartEventResult` 只有 `message` / `systemPrompt`，没有取消语义；handler 抛错也只是 `extension_error`，run 照旧。提供一个做不到的选项比不提供更坑。
 - **为什么 `tools` / `rules` 是结构化渲染而不是抽字符串**：抽字符串在 `SYSTEM.md` / `--system-prompt` 在场时直接没有源（pi 不生成那三段），而 `toolSnippets` / `toolGuidelines` / `getActiveTools()` 这些结构化数据一直都在。代价是抄了 pi 的拼装规则，靠 golden + 活体 drift 测试兜漂移（见「验证与排错」）。
